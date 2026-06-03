@@ -1,0 +1,953 @@
+#include <Arduino.h>
+#include "Config.h"
+#include "StorageManager.h"
+#include "ButtonManager.h"
+#include "DisplayManager.h"
+#include "BleManager.h"
+
+using namespace Adafruit_LittleFS_Namespace;
+
+enum SystemState {
+    STATE_BOOT,
+    STATE_MENU,
+    STATE_BOOK_LIST,
+    STATE_PC_BROWSE,
+    STATE_READER,
+    STATE_BLE_UPLOAD,
+    STATE_READER_MENU
+};
+
+SystemState currentState = STATE_BOOT;
+uint32_t lastActivityTime = 0;
+
+volatile bool bleRequestNextPage = false;
+volatile bool bleRequestPrevPage = false;
+
+bool isSystemInReaderMode() {
+    return currentState == STATE_READER;
+}
+
+// Book Reader States
+String activeBookFilename = "";
+String activeBookTitle = "";
+uint32_t currentPageOffset = 0;
+uint32_t nextPageOffset = 0;
+uint32_t activeBookSize = 0;
+
+// Menu variables
+String menuOptions[5];
+int menuCount = 0;
+int selectedMenuIdx = 0;
+
+// Book list variables
+String bookList[MAX_BOOKS];
+int bookCount = 0;
+int selectedBookIdx = 0;
+
+// PC Browse variables
+String pcBookList[MAX_BOOKS];
+int pcBookCount = 0;
+int selectedPcBookIdx = 0;
+bool resumeOnConnect = false;
+bool pcListFetched = false;
+
+// BLE Upload Status
+String bleStatusMsg = "Waiting for connection...";
+int bleBytesReceived = 0;
+bool bleUploadFinished = false;
+
+// Reader Menu variables
+String readerMenuOptions[6];
+int readerMenuCount = 6;
+int selectedReaderMenuIdx = 0;
+
+// Function declarations
+void transitionTo(SystemState newState);
+void handleMenu();
+void handleBookList();
+void handlePcBrowse();
+void handleReader();
+void handleBleUpload();
+void handleReaderMenu();
+void drawReaderMenu();
+void handleSerialUpload();
+void enterDeepSleep();
+void bleStateCallback(bool connected);
+void bleProgressCallback(const String& status, int bytesReceived, bool finished);
+
+void setup() {
+    Serial.begin(115200);
+    // Wait for Serial to open if USB plugged in (non-blocking)
+    uint32_t startSerial = millis();
+    while (!Serial && (millis() - startSerial < 1000));
+    
+    Serial.println("\n--- nRF52840 e-Paper Book Reader ---");
+
+    Serial.println("Initializing battery...");
+    analogReference(AR_INTERNAL_3_0); // 3.0V reference
+    analogReadResolution(10);        // 10-bit resolution
+
+    Serial.println("Initializing Storage...");
+    if (!StorageManager::getInstance().begin()) {
+        Serial.println("Storage initialization failed!");
+    }
+
+    Serial.println("Initializing Buttons...");
+    ButtonManager::getInstance().begin();
+
+    Serial.println("Initializing Display...");
+    DisplayManager::getInstance().begin();
+
+    Serial.println("Initializing BLE...");
+    BleManager::getInstance().begin(bleStateCallback, bleProgressCallback);
+    BleManager::getInstance().startAdvertising(); // Start advertising on boot for buttonless prototyping
+
+    lastActivityTime = millis();
+    Serial.println("Setup completed successfully.");
+
+    // 5. Automatic restore reading progress on startup
+    String savedBook = "";
+    uint32_t savedOffset = 0;
+    if (StorageManager::getInstance().readProgress(savedBook, savedOffset) && savedBook.length() > 0) {
+        Serial.print("Found reading progress: ");
+        Serial.print(savedBook);
+        Serial.print(" at offset ");
+        Serial.println(savedOffset);
+
+        // Open file to check it exists and read metadata
+        File file = StorageManager::getInstance().openBook(savedBook, "r");
+        if (file) {
+            activeBookFilename = savedBook;
+            activeBookSize = file.size();
+            
+            // Read first line as title
+            activeBookTitle = file.readStringUntil('\n');
+            activeBookTitle.trim();
+            file.close();
+
+            currentPageOffset = savedOffset;
+            
+            // Push very first page offset to history to initialize back navigation
+            DisplayManager::getInstance().clearHistory();
+            
+            // Calculate true text starting offset
+            uint32_t textStart = activeBookTitle.length() + 1;
+            DisplayManager::getInstance().pushHistory(textStart);
+            if (currentPageOffset > textStart) {
+                DisplayManager::getInstance().pushHistory(currentPageOffset);
+            }
+
+            transitionTo(STATE_READER);
+            return;
+        }
+    }
+
+    // Default to main menu
+    transitionTo(STATE_MENU);
+}
+
+void loop() {
+    // Keep BLE stack updated
+    BleManager::getInstance().update();
+
+    // Poll and debounce button presses
+    ButtonManager::getInstance().update();
+
+    // Check USB Serial for incoming book uploads
+    handleSerialUpload();
+
+    switch (currentState) {
+        case STATE_MENU:
+            handleMenu();
+            break;
+        case STATE_BOOK_LIST:
+            handleBookList();
+            break;
+        case STATE_PC_BROWSE:
+            handlePcBrowse();
+            break;
+        case STATE_READER:
+            handleReader();
+            break;
+        case STATE_BLE_UPLOAD:
+            handleBleUpload();
+            break;
+        case STATE_READER_MENU:
+            handleReaderMenu();
+            break;
+        default:
+            break;
+    }
+
+    // Handle auto-sleep timeout
+    // Do not sleep while connected to BLE or active upload stream
+    bool isBleConnected = BleManager::getInstance().isConnected() || BleManager::getInstance().isCentralConnected();
+    bool isBleBusy = isBleConnected || (bleBytesReceived > 0);
+
+    if (!isBleBusy && (millis() - lastActivityTime > AUTO_SLEEP_MS)) {
+        enterDeepSleep();
+    }
+
+    // yield to FreeRTOS
+    delay(10);
+}
+
+void transitionTo(SystemState newState) {
+    currentState = newState;
+    lastActivityTime = millis();
+    ButtonManager::getInstance().reset();
+
+    if (newState == STATE_MENU) {
+        Serial.println("Transition to: STATE_MENU");
+        // Rebuild menu items
+        menuCount = 0;
+        
+        // Show "Resume" option only if there is valid progress
+        String savedBook = "";
+        uint32_t savedOffset = 0;
+        if (StorageManager::getInstance().readProgress(savedBook, savedOffset) && savedBook.length() > 0) {
+            menuOptions[menuCount++] = "Resume Reading";
+        }
+        
+        menuOptions[menuCount++] = "Book List";
+        menuOptions[menuCount++] = "PC Books";
+        menuOptions[menuCount++] = "BLE Upload Mode";
+        menuOptions[menuCount++] = "Clear Storage";
+        
+        selectedMenuIdx = 0;
+
+        // Render Menu Screen
+        MenuView menu("Main Menu", menuOptions, menuCount, selectedMenuIdx);
+        DisplayManager::getInstance().draw(menu);
+    } 
+    else if (newState == STATE_BOOK_LIST) {
+        Serial.println("Transition to: STATE_BOOK_LIST");
+        // Retrieve books
+        bookCount = StorageManager::getInstance().listBooks(bookList, MAX_BOOKS);
+        selectedBookIdx = 0;
+
+        if (bookCount == 0) {
+            // Show error message
+            MessageView msg("Book List", "No books found!\nSelect BLE Upload Mode\nfrom the main menu\nto transfer books.", false);
+            DisplayManager::getInstance().draw(msg);
+        } else {
+            // Render list
+            // Clean filenames for display (remove .txt extension)
+            String cleanNames[MAX_BOOKS];
+            for (int i = 0; i < bookCount; i++) {
+                cleanNames[i] = bookList[i];
+                if (cleanNames[i].endsWith(".txt")) {
+                    cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+                }
+                // Replace underscores with spaces for premium look
+                cleanNames[i].replace("_", " ");
+            }
+            MenuView menu("Select Book", cleanNames, bookCount, selectedBookIdx);
+            DisplayManager::getInstance().draw(menu);
+        }
+    } 
+    else if (newState == STATE_PC_BROWSE) {
+        Serial.println("Transition to: STATE_PC_BROWSE");
+        selectedPcBookIdx = 0;
+        pcListFetched = false;
+        
+        if (BleManager::getInstance().isCentralConnected()) {
+            MessageView msg("PC Books", "Retrieving book list...", false);
+            DisplayManager::getInstance().draw(msg);
+            
+            if (BleManager::getInstance().requestBookList(pcBookList, MAX_BOOKS, pcBookCount)) {
+                pcListFetched = true;
+                if (pcBookCount == 0) {
+                    MessageView noBooksMsg("PC Books", "No books found on PC.", false);
+                    DisplayManager::getInstance().draw(noBooksMsg);
+                    delay(1500);
+                    transitionTo(STATE_MENU);
+                } else {
+                    String cleanNames[MAX_BOOKS];
+                    for (int i = 0; i < pcBookCount; i++) {
+                        cleanNames[i] = pcBookList[i];
+                        if (cleanNames[i].endsWith(".txt")) {
+                            cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+                        }
+                        cleanNames[i].replace("_", " ");
+                    }
+                    MenuView menu("Select PC Book", cleanNames, pcBookCount, selectedPcBookIdx);
+                    DisplayManager::getInstance().draw(menu);
+                }
+            } else {
+                MessageView errMsg("Error", "Failed to get book list.\nReturning to menu...", true);
+                DisplayManager::getInstance().draw(errMsg);
+                delay(1500);
+                transitionTo(STATE_MENU);
+            }
+        } else {
+            BleManager::getInstance().startScanning();
+            MessageView msg("PC Books", "Scanning for PC...\nMake sure ble_server.py\nis running on your PC.", false);
+            DisplayManager::getInstance().draw(msg);
+        }
+    }
+    else if (newState == STATE_READER) {
+        Serial.println("Transition to: STATE_READER");
+        // Render current page
+        ReaderView reader(activeBookFilename, currentPageOffset, nextPageOffset);
+        DisplayManager::getInstance().draw(reader);
+    } 
+    else if (newState == STATE_BLE_UPLOAD) {
+        Serial.println("Transition to: STATE_BLE_UPLOAD");
+        bleStatusMsg = "Waiting for connection...";
+        bleBytesReceived = 0;
+        bleUploadFinished = false;
+
+        // Turn on VCC to power up display and stabilize BLE
+        ButtonManager::getInstance().setPeripheralPower(true);
+        BleManager::getInstance().startAdvertising();
+
+        MessageView msg("BLE Upload", "Device Name: nRF_Epd_Reader\n\nStatus: Advertising BLE...\nUse nRF Connect or NUS App\nto stream a book text file.", false);
+        DisplayManager::getInstance().draw(msg);
+    }
+    else if (newState == STATE_READER_MENU) {
+        Serial.println("Transition to: STATE_READER_MENU");
+        selectedReaderMenuIdx = 0;
+        drawReaderMenu();
+    }
+}
+
+void handleMenu() {
+    ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+    ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+
+    if (prev == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedMenuIdx = (selectedMenuIdx - 1 + menuCount) % menuCount;
+        MenuView menu("Main Menu", menuOptions, menuCount, selectedMenuIdx);
+        DisplayManager::getInstance().draw(menu);
+    } 
+    else if (next == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedMenuIdx = (selectedMenuIdx + 1) % menuCount;
+        MenuView menu("Main Menu", menuOptions, menuCount, selectedMenuIdx);
+        DisplayManager::getInstance().draw(menu);
+    } 
+    else if (select == BTN_CLICK) {
+        lastActivityTime = millis();
+        String selection = menuOptions[selectedMenuIdx];
+
+        if (selection == "Resume Reading") {
+            String savedBook = "";
+            uint32_t savedOffset = 0;
+            if (StorageManager::getInstance().readProgress(savedBook, savedOffset)) {
+                if (savedBook.startsWith("[BLE]")) {
+                    activeBookFilename = savedBook;
+                    currentPageOffset = savedOffset;
+                    resumeOnConnect = true;
+                    transitionTo(STATE_PC_BROWSE);
+                } else {
+                    File file = StorageManager::getInstance().openBook(savedBook, "r");
+                    if (file) {
+                        activeBookFilename = savedBook;
+                        activeBookSize = file.size();
+                        activeBookTitle = file.readStringUntil('\n');
+                        activeBookTitle.trim();
+                        file.close();
+
+                        currentPageOffset = savedOffset;
+                        
+                        DisplayManager::getInstance().clearHistory();
+                        uint32_t textStart = activeBookTitle.length() + 1;
+                        DisplayManager::getInstance().pushHistory(textStart);
+                        if (currentPageOffset > textStart) {
+                            DisplayManager::getInstance().pushHistory(currentPageOffset);
+                        }
+
+                        transitionTo(STATE_READER);
+                    }
+                }
+            }
+        } 
+        else if (selection == "Book List") {
+            transitionTo(STATE_BOOK_LIST);
+        } 
+        else if (selection == "PC Books") {
+            transitionTo(STATE_PC_BROWSE);
+        }
+        else if (selection == "BLE Upload Mode") {
+            transitionTo(STATE_BLE_UPLOAD);
+        } 
+        else if (selection == "Clear Storage") {
+            MessageView formattingMsg("Formatting", "Clearing storage files\nPlease wait...", false);
+            DisplayManager::getInstance().draw(formattingMsg);
+            StorageManager::getInstance().clearStorage();
+            DisplayManager::getInstance().saveSettings(); // Restore font preferences to new filesystem
+            MessageView clearedMsg("Storage Cleared", "All books and reading\nprogress have been deleted.", false);
+            DisplayManager::getInstance().draw(clearedMsg);
+            delay(1500);
+            transitionTo(STATE_MENU);
+        }
+    }
+}
+
+void handleBookList() {
+    ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+    ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+
+    // If no books are found, any select action or long press goes back
+    if (bookCount == 0) {
+        if (select == BTN_CLICK || select == BTN_LONG_PRESS || prev == BTN_CLICK || next == BTN_CLICK) {
+            transitionTo(STATE_MENU);
+        }
+        return;
+    }
+
+    if (prev == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedBookIdx = (selectedBookIdx - 1 + bookCount) % bookCount;
+        
+        String cleanNames[MAX_BOOKS];
+        for (int i = 0; i < bookCount; i++) {
+            cleanNames[i] = bookList[i];
+            if (cleanNames[i].endsWith(".txt")) cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+            cleanNames[i].replace("_", " ");
+        }
+        MenuView menu("Select Book", cleanNames, bookCount, selectedBookIdx);
+        DisplayManager::getInstance().draw(menu);
+    } 
+    else if (next == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedBookIdx = (selectedBookIdx + 1) % bookCount;
+
+        String cleanNames[MAX_BOOKS];
+        for (int i = 0; i < bookCount; i++) {
+            cleanNames[i] = bookList[i];
+            if (cleanNames[i].endsWith(".txt")) cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+            cleanNames[i].replace("_", " ");
+        }
+        MenuView menu("Select Book", cleanNames, bookCount, selectedBookIdx);
+        DisplayManager::getInstance().draw(menu);
+    } 
+    else if (select == BTN_CLICK) {
+        lastActivityTime = millis();
+        
+        // Open book
+        activeBookFilename = bookList[selectedBookIdx];
+        File file = StorageManager::getInstance().openBook(activeBookFilename, "r");
+        if (file) {
+            activeBookSize = file.size();
+            activeBookTitle = file.readStringUntil('\n');
+            activeBookTitle.trim();
+            file.close();
+
+            // Start at beginning (which will dynamically resolve past the metadata first line)
+            currentPageOffset = 0;
+            
+            DisplayManager::getInstance().clearHistory();
+            uint32_t textStart = activeBookTitle.length() + 1;
+            DisplayManager::getInstance().pushHistory(textStart);
+
+            // Write progress
+            StorageManager::getInstance().writeProgress(activeBookFilename, textStart);
+
+            transitionTo(STATE_READER);
+        } else {
+            MessageView errMsg("Error", "Could not open selected book.", true);
+            DisplayManager::getInstance().draw(errMsg);
+            delay(1500);
+            transitionTo(STATE_BOOK_LIST);
+        }
+    }
+    else if (select == BTN_LONG_PRESS) {
+        transitionTo(STATE_MENU);
+    }
+}
+
+void handleReader() {
+    if (activeBookFilename.startsWith("[BLE]") && !BleManager::getInstance().isCentralConnected()) {
+        MessageView msg("Connection Lost", "Lost connection to PC.\nReturning to menu...", true);
+        DisplayManager::getInstance().draw(msg);
+        delay(2000);
+        transitionTo(STATE_MENU);
+        return;
+    }
+
+    ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+    ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+
+    if (next == BTN_CLICK || bleRequestNextPage) {
+        bleRequestNextPage = false;
+        lastActivityTime = millis();
+        if (nextPageOffset < activeBookSize && nextPageOffset != currentPageOffset) {
+            currentPageOffset = nextPageOffset;
+            DisplayManager::getInstance().pushHistory(currentPageOffset);
+            StorageManager::getInstance().writeProgress(activeBookFilename, currentPageOffset);
+            transitionTo(STATE_READER);
+        } else {
+            // Already at end of book, show a completed alert
+            MessageView msg("The End", "You have finished reading:\n" + activeBookTitle + "\n\nPress select to return.", false);
+            DisplayManager::getInstance().draw(msg);
+            // Stay in reader but wait for select button to return
+            currentPageOffset = nextPageOffset; // ensure we are locked at end
+        }
+    } 
+    else if (prev == BTN_CLICK || bleRequestPrevPage) {
+        bleRequestPrevPage = false;
+        lastActivityTime = millis();
+        if (DisplayManager::getInstance().hasHistory()) {
+            currentPageOffset = DisplayManager::getInstance().popHistory();
+            StorageManager::getInstance().writeProgress(activeBookFilename, currentPageOffset);
+            transitionTo(STATE_READER);
+        }
+    } 
+    else if (select == BTN_CLICK) {
+        lastActivityTime = millis();
+        transitionTo(STATE_READER_MENU);
+    }
+    else if (select == BTN_LONG_PRESS) {
+        lastActivityTime = millis();
+        transitionTo(STATE_MENU);
+    }
+}
+
+void handleBleUpload() {
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+
+    // Press select or long press to stop advertising and go back to menu
+    if (select == BTN_CLICK || select == BTN_LONG_PRESS) {
+        BleManager::getInstance().stopAdvertising();
+        transitionTo(STATE_MENU);
+        return;
+    }
+
+    if (bleUploadFinished) {
+        // If finished, wait for any button action to return to menu
+        ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+        ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+        if (prev != BTN_NONE || next != BTN_NONE || select != BTN_NONE) {
+            bleUploadFinished = false;
+            bleBytesReceived = 0;
+            transitionTo(STATE_MENU);
+        }
+    }
+}
+
+void bleStateCallback(bool connected) {
+    lastActivityTime = millis();
+    if (connected) {
+        bleStatusMsg = "Connected!";
+        if (currentState == STATE_BLE_UPLOAD) {
+            MessageView msg("BLE Upload", "Status: Connected!\n\nStreaming text file...", false);
+            DisplayManager::getInstance().draw(msg);
+        }
+    } else {
+        bleStatusMsg = "Disconnected.";
+        if (currentState == STATE_BLE_UPLOAD) {
+            MessageView msg("BLE Upload", "Status: Disconnected.\n\nWaiting for connection...", false);
+            DisplayManager::getInstance().draw(msg);
+        }
+    }
+}
+
+void bleProgressCallback(const String& status, int bytesReceived, bool finished) {
+    lastActivityTime = millis();
+    bleBytesReceived = bytesReceived;
+
+    if (finished) {
+        bleUploadFinished = true;
+        BleManager::getInstance().stopAdvertising();
+        
+        if (currentState == STATE_BLE_UPLOAD) {
+            // Calculate size in KB
+            float sizeKB = bytesReceived / 1024.0;
+            String sizeMsg = String(sizeKB, 1) + " KB";
+            MessageView msg("Upload Complete", status + "\nSize: " + sizeMsg + "\n\nPress any button to return.", false);
+            DisplayManager::getInstance().draw(msg);
+        } else {
+            // Reset upload flags silently if completed in background
+            bleUploadFinished = false;
+            bleBytesReceived = 0;
+        }
+    } else {
+        // Do nothing! Do not refresh the slow e-Paper screen during data stream.
+    }
+}
+
+void enterDeepSleep() {
+    Serial.println("System idle timeout! Entering Deep Sleep (System OFF)...");
+
+    // 1. Power down e-Paper screen
+    DisplayManager::getInstance().powerDown();
+
+    // 2. Terminate VCC power pin 13 to cut off all peripheral leaks
+    ButtonManager::getInstance().setPeripheralPower(false);
+
+    // 3. Stop Bluetooth stack advertising/connection
+    BleManager::getInstance().stopAdvertising();
+
+    // 4. Re-configure the button GPIOs to hardware-sense LOW levels to trigger wakeup
+    pinMode(PIN_BTN_PREV, INPUT_PULLUP_SENSE);
+    pinMode(PIN_BTN_NEXT, INPUT_PULLUP_SENSE);
+    pinMode(PIN_BTN_SELECT, INPUT_PULLUP_SENSE);
+
+    // 5. Set magic retention flag to identify deep sleep wakeup on boot
+    sd_power_gpregret_clr(0, 0xFF);
+    sd_power_gpregret_set(0, 0x55);
+
+    // 6. Trigger nRF52840 chip system off deep sleep
+    sd_power_system_off();
+
+    // Microcontroller enters static sleep. Waking up resets the board and starts setup().
+}
+
+void drawReaderMenu() {
+    int percent = 0;
+    if (activeBookSize > 0) {
+        percent = (currentPageOffset * 100) / activeBookSize;
+    }
+
+    readerMenuOptions[0] = "Resume Reading";
+    readerMenuOptions[1] = "Bookmark Page";
+
+    uint32_t bmkOffset = 0;
+    bool hasBmk = StorageManager::getInstance().readBookmark(activeBookFilename, bmkOffset);
+    if (hasBmk) {
+        int bmkPercent = (bmkOffset * 100) / activeBookSize;
+        readerMenuOptions[2] = "Go to Bookmark (" + String(bmkPercent) + "%)";
+    } else {
+        readerMenuOptions[2] = "Go to Bookmark (None)";
+    }
+
+    FontType fontType = DisplayManager::getInstance().getFontType();
+    String fontName = "Sans";
+    if (fontType == FONT_SERIF) fontName = "Bookerly";
+    else if (fontType == FONT_MONO) fontName = "Mono";
+    else if (fontType == FONT_LITERATA) fontName = "Literata";
+    readerMenuOptions[3] = "Font: " + fontName;
+
+    FontSize fontSize = DisplayManager::getInstance().getFontSize();
+    String sizeName = "Small";
+    if (fontSize == SIZE_MEDIUM) sizeName = "Medium";
+    else if (fontSize == SIZE_LARGE) sizeName = "Large";
+    readerMenuOptions[4] = "Size: " + sizeName;
+
+    readerMenuOptions[5] = "Exit to Main Menu";
+
+    String header = "Reader Menu (" + String(percent) + "%)";
+    MenuView menu(header, readerMenuOptions, 6, selectedReaderMenuIdx);
+    DisplayManager::getInstance().draw(menu);
+}
+
+void handleReaderMenu() {
+    ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+    ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+
+    if (prev == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedReaderMenuIdx = (selectedReaderMenuIdx - 1 + readerMenuCount) % readerMenuCount;
+        drawReaderMenu();
+    }
+    else if (next == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedReaderMenuIdx = (selectedReaderMenuIdx + 1) % readerMenuCount;
+        drawReaderMenu();
+    }
+    else if (select == BTN_CLICK) {
+        lastActivityTime = millis();
+        if (selectedReaderMenuIdx == 0) {
+            transitionTo(STATE_READER);
+        }
+        else if (selectedReaderMenuIdx == 1) {
+            StorageManager::getInstance().writeBookmark(activeBookFilename, currentPageOffset);
+            MessageView msg("Bookmark Set", "Current page bookmark\nsaved successfully.", false);
+            DisplayManager::getInstance().draw(msg);
+            delay(1200);
+            drawReaderMenu();
+        }
+        else if (selectedReaderMenuIdx == 2) {
+            uint32_t bmkOffset = 0;
+            if (StorageManager::getInstance().readBookmark(activeBookFilename, bmkOffset)) {
+                currentPageOffset = bmkOffset;
+                StorageManager::getInstance().writeProgress(activeBookFilename, currentPageOffset);
+                
+                DisplayManager::getInstance().clearHistory();
+                uint32_t textStart = activeBookTitle.length() + 1;
+                DisplayManager::getInstance().pushHistory(textStart);
+                if (currentPageOffset > textStart) {
+                    DisplayManager::getInstance().pushHistory(currentPageOffset);
+                }
+                
+                MessageView msg("Jumping...", "Loading bookmark offset\nPlease wait...", false);
+                DisplayManager::getInstance().draw(msg);
+                delay(1000);
+                transitionTo(STATE_READER);
+            } else {
+                MessageView msg("No Bookmark", "No bookmark has been\nset for this book.", true);
+                DisplayManager::getInstance().draw(msg);
+                delay(1200);
+                drawReaderMenu();
+            }
+        }
+        else if (selectedReaderMenuIdx == 3) {
+            DisplayManager::getInstance().cycleFontType();
+            drawReaderMenu();
+        }
+        else if (selectedReaderMenuIdx == 4) {
+            DisplayManager::getInstance().cycleFontSize();
+            drawReaderMenu();
+        }
+        else if (selectedReaderMenuIdx == 5) {
+            transitionTo(STATE_MENU);
+        }
+    }
+}
+
+void handleSerialUpload() {
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        
+        if (cmd.startsWith("USB_UPLOAD:")) {
+            int colonIdx = cmd.indexOf(':', 11);
+            uint32_t size = 0;
+            String title = "";
+            if (colonIdx > 0) {
+                size = cmd.substring(11, colonIdx).toInt();
+                title = cmd.substring(colonIdx + 1);
+            } else {
+                size = cmd.substring(11).toInt();
+            }
+            title.trim();
+
+            Serial.println("USB_READY");
+            Serial.flush();
+
+            // Stop BLE advertising during USB upload to prevent SoftDevice radio scheduling and interrupt conflicts
+            BleManager::getInstance().stopAdvertising();
+
+            StorageManager::getInstance().startNewBookWrite();
+            uint32_t bytesReceived = 0;
+            uint32_t lastRead = millis();
+            
+            // Statically allocate a 512-byte sector buffer to prevent stack footprint
+            static uint8_t sectorBuf[512];
+            uint16_t sectorCount = 0;
+            
+            while (bytesReceived < size && (millis() - lastRead < 5000)) {
+                if (Serial.available()) {
+                    uint8_t buf[64];
+                    uint32_t toRead = min((size - bytesReceived), (uint32_t)sizeof(buf));
+                    int count = Serial.readBytes(buf, toRead);
+                    if (count > 0) {
+                        // Accumulate incoming bytes into sector buffer
+                        for (int i = 0; i < count; i++) {
+                            sectorBuf[sectorCount++] = buf[i];
+                            
+                            // Commit sector block to LittleFS once buffer is full
+                            if (sectorCount >= sizeof(sectorBuf)) {
+                                bool writeOk = StorageManager::getInstance().writeBookChunk(sectorBuf, sectorCount);
+                                if (!writeOk) {
+                                    Serial.print("[Device Debug] USB Serial upload: writeBookChunk failed at ");
+                                    Serial.print(bytesReceived - count + i + 1);
+                                    Serial.println(" bytes.");
+                                }
+                                sectorCount = 0;
+                                delay(5); // Allow TinyUSB and FreeRTOS tasks to execute
+                            }
+                        }
+                        bytesReceived += count;
+                        lastRead = millis();
+                    }
+                } else {
+                    delay(3); // Yield CPU while waiting for serial bytes
+                }
+                yield();
+            }
+
+            // Flush any remaining bytes in the buffer to flash
+            if (sectorCount > 0) {
+                bool writeOk = StorageManager::getInstance().writeBookChunk(sectorBuf, sectorCount);
+                if (!writeOk) {
+                    Serial.println("[Device Debug] USB Serial upload: Final buffer flush failed.");
+                }
+            }
+
+            if (bytesReceived >= size) {
+                bool success = StorageManager::getInstance().finalizeBookWrite(title);
+                if (success) {
+                    Serial.println("USB_SUCCESS");
+                } else {
+                    Serial.println("USB_FAILED");
+                }
+            } else {
+                Serial.println("USB_TIMEOUT");
+            }
+            Serial.flush();
+
+            // Restart BLE advertising after USB upload completes
+            BleManager::getInstance().startAdvertising();
+        }
+    }
+}
+
+void handlePcBrowse() {
+    if (!BleManager::getInstance().isCentralConnected()) {
+        static uint32_t scanStartTime = 0;
+        if (scanStartTime == 0) {
+            scanStartTime = millis();
+        }
+        
+        if (BleManager::getInstance().isCentralConnected()) {
+            BleManager::getInstance().stopScanning();
+            scanStartTime = 0;
+            if (resumeOnConnect) {
+                resumeOnConnect = false;
+                String realFilename = activeBookFilename.substring(5);
+                
+                MessageView msg("Resuming", "Fetching book metrics...", false);
+                DisplayManager::getInstance().draw(msg);
+                
+                activeBookSize = BleManager::getInstance().requestBookSize(realFilename);
+                activeBookTitle = realFilename;
+                if (activeBookTitle.endsWith(".txt")) {
+                    activeBookTitle = activeBookTitle.substring(0, activeBookTitle.length() - 4);
+                }
+                activeBookTitle.replace("_", " ");
+                
+                DisplayManager::getInstance().clearHistory();
+                char tempBuf[128];
+                int len = BleManager::getInstance().requestBookText(realFilename, 0, tempBuf, sizeof(tempBuf) - 1);
+                tempBuf[len] = '\0';
+                char* newlinePtr = strchr(tempBuf, '\n');
+                uint32_t textStart = 0;
+                if (newlinePtr) {
+                    textStart = (newlinePtr - tempBuf) + 1;
+                }
+                DisplayManager::getInstance().pushHistory(textStart);
+                if (currentPageOffset > textStart) {
+                    DisplayManager::getInstance().pushHistory(currentPageOffset);
+                }
+                transitionTo(STATE_READER);
+            } else {
+                transitionTo(STATE_PC_BROWSE);
+            }
+            return;
+        }
+        
+        if (millis() - scanStartTime > 15000) { // 15-second scan timeout
+            BleManager::getInstance().stopScanning();
+            scanStartTime = 0;
+            MessageView msg("Not Found", "EpdBookServer not found.\nReturning to menu...", true);
+            DisplayManager::getInstance().draw(msg);
+            delay(2000);
+            transitionTo(STATE_MENU);
+        }
+        return;
+    }
+    
+    if (!pcListFetched) {
+        BleManager::getInstance().stopScanning();
+        if (resumeOnConnect) {
+            resumeOnConnect = false;
+            String realFilename = activeBookFilename.substring(5);
+            
+            MessageView msg("Resuming", "Fetching book metrics...", false);
+            DisplayManager::getInstance().draw(msg);
+            
+            activeBookSize = BleManager::getInstance().requestBookSize(realFilename);
+            activeBookTitle = realFilename;
+            if (activeBookTitle.endsWith(".txt")) {
+                activeBookTitle = activeBookTitle.substring(0, activeBookTitle.length() - 4);
+            }
+            activeBookTitle.replace("_", " ");
+            
+            DisplayManager::getInstance().clearHistory();
+            char tempBuf[128];
+            int len = BleManager::getInstance().requestBookText(realFilename, 0, tempBuf, sizeof(tempBuf) - 1);
+            tempBuf[len] = '\0';
+            char* newlinePtr = strchr(tempBuf, '\n');
+            uint32_t textStart = 0;
+            if (newlinePtr) {
+                textStart = (newlinePtr - tempBuf) + 1;
+            }
+            DisplayManager::getInstance().pushHistory(textStart);
+            if (currentPageOffset > textStart) {
+                DisplayManager::getInstance().pushHistory(currentPageOffset);
+            }
+            transitionTo(STATE_READER);
+        } else {
+            transitionTo(STATE_PC_BROWSE);
+        }
+        return;
+    }
+    
+    ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+    ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+    
+    if (pcBookCount == 0) {
+        if (select == BTN_CLICK || select == BTN_LONG_PRESS || prev == BTN_CLICK || next == BTN_CLICK) {
+            transitionTo(STATE_MENU);
+        }
+        return;
+    }
+    
+    if (prev == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedPcBookIdx = (selectedPcBookIdx - 1 + pcBookCount) % pcBookCount;
+        String cleanNames[MAX_BOOKS];
+        for (int i = 0; i < pcBookCount; i++) {
+            cleanNames[i] = pcBookList[i];
+            if (cleanNames[i].endsWith(".txt")) cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+            cleanNames[i].replace("_", " ");
+        }
+        MenuView menu("Select PC Book", cleanNames, pcBookCount, selectedPcBookIdx);
+        DisplayManager::getInstance().draw(menu);
+    }
+    else if (next == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedPcBookIdx = (selectedPcBookIdx + 1) % pcBookCount;
+        String cleanNames[MAX_BOOKS];
+        for (int i = 0; i < pcBookCount; i++) {
+            cleanNames[i] = pcBookList[i];
+            if (cleanNames[i].endsWith(".txt")) cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+            cleanNames[i].replace("_", " ");
+        }
+        MenuView menu("Select PC Book", cleanNames, pcBookCount, selectedPcBookIdx);
+        DisplayManager::getInstance().draw(menu);
+    }
+    else if (select == BTN_CLICK) {
+        lastActivityTime = millis();
+        String selectedBook = pcBookList[selectedPcBookIdx];
+        
+        MessageView msg("PC Books", "Connecting to book...", false);
+        DisplayManager::getInstance().draw(msg);
+        
+        activeBookFilename = "[BLE]" + selectedBook;
+        activeBookSize = BleManager::getInstance().requestBookSize(selectedBook);
+        activeBookTitle = selectedBook;
+        if (activeBookTitle.endsWith(".txt")) {
+            activeBookTitle = activeBookTitle.substring(0, activeBookTitle.length() - 4);
+        }
+        activeBookTitle.replace("_", " ");
+        
+        currentPageOffset = 0;
+        DisplayManager::getInstance().clearHistory();
+        
+        char tempBuf[128];
+        int len = BleManager::getInstance().requestBookText(selectedBook, 0, tempBuf, sizeof(tempBuf) - 1);
+        tempBuf[len] = '\0';
+        char* newlinePtr = strchr(tempBuf, '\n');
+        uint32_t textStart = 0;
+        if (newlinePtr) {
+            textStart = (newlinePtr - tempBuf) + 1;
+        }
+        DisplayManager::getInstance().pushHistory(textStart);
+        StorageManager::getInstance().writeProgress(activeBookFilename, textStart);
+        
+        transitionTo(STATE_READER);
+    }
+    else if (select == BTN_LONG_PRESS) {
+        transitionTo(STATE_MENU);
+    }
+}

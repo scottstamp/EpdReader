@@ -1,0 +1,1352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="description" content="Wireless Web Bluetooth dashboard and e-book manager for nice!nano e-Paper Book Reader devices.">
+  <title>nRF e-Paper Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      --bg-primary: #0b0f19;
+      --bg-surface: rgba(17, 24, 39, 0.6);
+      --bg-surface-hover: rgba(17, 24, 39, 0.8);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --text-primary: #f3f4f6;
+      --text-secondary: #9ca3af;
+      --primary: #4facfe;
+      --primary-glow: rgba(79, 172, 254, 0.4);
+      --accent: #00f2fe;
+      --accent-glow: rgba(0, 242, 254, 0.3);
+      --success: #10b981;
+      --success-glow: rgba(16, 185, 129, 0.3);
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --warning: #f59e0b;
+      --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+      --radius: 16px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(79, 172, 254, 0.05) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(0, 242, 254, 0.05) 0%, transparent 40%);
+      padding-bottom: 80px;
+    }
+
+    h1, h2, h3, .brand {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 600;
+    }
+
+    /* Container */
+    .app-container {
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 0 24px 0;
+    }
+
+    .brand-section {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-icon {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      color: #000;
+      box-shadow: 0 0 15px var(--primary-glow);
+    }
+
+    .brand-title h1 {
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+    }
+    
+    .brand-title span {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      display: block;
+    }
+
+    /* Pair Button */
+    .btn-connect {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #05070d;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 30px;
+      font-weight: 600;
+      font-family: 'Outfit', sans-serif;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 4px 15px var(--primary-glow);
+      transition: all 0.3s ease;
+      font-size: 0.9rem;
+    }
+
+    .btn-connect.connected {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid var(--success);
+      color: var(--success);
+      box-shadow: 0 0 10px var(--success-glow);
+    }
+
+    .btn-connect:active {
+      transform: scale(0.96);
+    }
+
+    .pulse-ring {
+      width: 8px;
+      height: 8px;
+      background-color: currentColor;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .btn-connect:not(.connected) .pulse-ring {
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(0.9); opacity: 1; }
+      50% { transform: scale(1.4); opacity: 0.4; }
+      100% { transform: scale(0.9); opacity: 1; }
+    }
+
+    /* Dashboard Cards */
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: var(--glass-shadow);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      transition: border-color 0.3s ease;
+    }
+
+    .card:hover {
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    .card-title {
+      font-size: 1rem;
+      margin-bottom: 16px;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 10px;
+    }
+
+    /* Telemetry Grid */
+    .telemetry-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .tel-item {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 12px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .tel-label {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+
+    .tel-val {
+      font-size: 1.1rem;
+      font-weight: 700;
+      font-family: 'Outfit', sans-serif;
+      color: var(--text-primary);
+    }
+
+    .tel-icon {
+      font-size: 1.2rem;
+      margin-bottom: 4px;
+    }
+
+    /* Storage bar card */
+    .storage-container {
+      margin-top: 12px;
+    }
+
+    .storage-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 10px;
+      background-color: rgba(255, 255, 255, 0.05);
+      border-radius: 5px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      box-shadow: 0 0 10px var(--primary-glow);
+      border-radius: 5px;
+      transition: width 0.5s ease;
+    }
+
+    /* Control Keypad */
+    .controls-layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+
+    .touch-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+
+    .touch-btn {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 16px 12px;
+      border-radius: 12px;
+      font-family: 'Outfit', sans-serif;
+      font-weight: 500;
+      font-size: 0.9rem;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+    }
+
+    .touch-btn:active {
+      background: rgba(255, 255, 255, 0.1);
+      transform: scale(0.95);
+      border-color: var(--primary);
+      box-shadow: 0 0 10px var(--primary-glow);
+    }
+
+    .touch-btn.accent {
+      background: rgba(79, 172, 254, 0.05);
+      border-color: rgba(79, 172, 254, 0.2);
+    }
+
+    .touch-btn.double {
+      grid-column: span 2;
+    }
+
+    .btn-icon {
+      font-size: 1.25rem;
+    }
+
+    /* Bookshelf */
+    .books-scroll {
+      max-height: 250px;
+      overflow-y: auto;
+      margin-right: -10px;
+      padding-right: 10px;
+    }
+
+    .books-scroll::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .books-scroll::-webkit-scrollbar-thumb {
+      background-color: var(--border-color);
+      border-radius: 2px;
+    }
+
+    .book-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.01);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 10px 14px;
+      margin-bottom: 8px;
+      transition: background 0.2s ease;
+    }
+
+    .book-item:hover {
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .book-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .book-name {
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .book-size {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+
+    .btn-delete {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      color: var(--danger);
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+
+    .btn-delete:active {
+      background: var(--danger);
+      color: #fff;
+      transform: scale(0.9);
+    }
+
+    .no-books {
+      text-align: center;
+      padding: 24px;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+    }
+
+    /* Upload Panel */
+    .upload-zone {
+      border: 2px dashed var(--border-color);
+      border-radius: 12px;
+      padding: 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    .upload-zone:hover, .upload-zone.dragover {
+      border-color: var(--primary);
+      background: rgba(79, 172, 254, 0.02);
+    }
+
+    .upload-icon {
+      font-size: 2rem;
+      margin-bottom: 8px;
+      display: inline-block;
+    }
+
+    .upload-text h4 {
+      font-size: 0.9rem;
+      margin-bottom: 4px;
+    }
+
+    .upload-text p {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+
+    .upload-form {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .file-input {
+      display: none;
+    }
+
+    .input-field {
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.85rem;
+      outline: none;
+      transition: border-color 0.2s ease;
+    }
+
+    .input-field:focus {
+      border-color: var(--primary);
+    }
+
+    .btn-upload {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #05070d;
+      border: none;
+      padding: 12px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-family: 'Outfit', sans-serif;
+      cursor: pointer;
+      transition: transform 0.2s ease;
+    }
+
+    .btn-upload:active {
+      transform: scale(0.98);
+    }
+
+    /* Active Upload Overlay */
+    .upload-progress-container {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 16px;
+      margin-top: 12px;
+      display: none;
+    }
+
+    .upload-progress-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      margin-bottom: 8px;
+    }
+
+    .upload-progress-details {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      margin-top: 6px;
+    }
+
+    /* Monospaced Log Console */
+    .console-card {
+      margin-top: 16px;
+    }
+
+    .console-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+    }
+
+    .console-toggle {
+      font-size: 0.75rem;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 4px 8px;
+      border-radius: 4px;
+      color: var(--text-secondary);
+    }
+
+    .console-terminal {
+      background: #05070c;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      height: 120px;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.75rem;
+      padding: 10px;
+      overflow-y: auto;
+      margin-top: 12px;
+      display: none;
+      color: #00ff66;
+      text-shadow: 0 0 5px rgba(0, 255, 102, 0.3);
+    }
+
+    .console-line {
+      margin-bottom: 4px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .console-line.tx { color: #00f2fe; text-shadow: 0 0 5px rgba(0, 242, 254, 0.3); }
+    .console-line.rx { color: #00ff66; text-shadow: 0 0 5px rgba(0, 255, 102, 0.3); }
+    .console-line.err { color: #ef4444; text-shadow: 0 0 5px rgba(239, 68, 68, 0.3); }
+    .console-line.info { color: #f59e0b; text-shadow: 0 0 5px rgba(245, 158, 11, 0.3); }
+
+    /* Toast Notification */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: rgba(17, 24, 39, 0.95);
+      border: 1px solid var(--border-color);
+      padding: 12px 24px;
+      border-radius: 30px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-primary);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      z-index: 1000;
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .toast.success { border-color: var(--success); }
+    .toast.danger { border-color: var(--danger); }
+    
+    /* Disabled UI shielding when disconnected */
+    .disabled-overlay {
+      pointer-events: none;
+      opacity: 0.4;
+      filter: grayscale(80%);
+      transition: all 0.3s ease;
+    }
+
+    .disabled-overlay.enabled {
+      pointer-events: auto;
+      opacity: 1;
+      filter: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="app-container">
+    
+    <!-- Security Warning Banner (Hidden by default) -->
+    <div id="secure-context-warning" class="card" style="display: none; border-color: var(--warning); background: rgba(245, 158, 11, 0.05); padding: 16px; margin-bottom: 16px;">
+      <div class="card-title" style="border-bottom: none; margin-bottom: 8px; color: var(--warning); padding-bottom: 0;">
+        <span class="btn-icon">⚠️</span> Bluetooth Disabled (Secure Context Required)
+      </div>
+      <p style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4; margin-bottom: 10px;">
+        Web Bluetooth is unavailable. Browsers require a <strong>Secure Context (HTTPS or localhost)</strong> to run Web Bluetooth APIs.
+      </p>
+      
+      <div id="ios-instruction" style="display: none; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(245, 158, 11, 0.15); border-radius: 8px; padding: 10px; font-size: 0.75rem; color: var(--text-primary); line-height: 1.5; margin-bottom: 8px;">
+        <strong>How to fix on iOS (iPhone/iPad):</strong><br>
+        Standard iOS Safari does not support Web Bluetooth. Please download a Web Bluetooth browser from the App Store, such as <strong>Bluefy</strong> or <strong>WebBLE</strong>, and open this URL within that app.
+      </div>
+      
+      <div id="android-instruction" style="display: none; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(245, 158, 11, 0.15); border-radius: 8px; padding: 10px; font-size: 0.75rem; color: var(--text-primary); line-height: 1.5;">
+        <strong>How to fix on Android Chrome:</strong>
+        <ol style="margin-left: 16px; margin-top: 6px; display: flex; flex-direction: column; gap: 4px;">
+          <li>Open a new tab in Chrome and go to:<br><code style="color: var(--warning); font-family: monospace; word-break: break-all;">chrome://flags/#unsafely-treat-insecure-origin-as-secure</code></li>
+          <li>Set the flag to <strong>Enabled</strong>.</li>
+          <li>Paste this page's origin address into the text box:<br><code id="origin-placeholder" style="color: var(--warning); font-family: monospace; word-break: break-all;">http://192.168.x.x:8000</code></li>
+          <li>Relaunch Chrome (tap 'Relaunch' at bottom) and reload this page.</li>
+        </ol>
+      </div>
+      
+      <div id="general-instruction" style="display: none; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(245, 158, 11, 0.15); border-radius: 8px; padding: 10px; font-size: 0.75rem; color: var(--text-primary); line-height: 1.5;">
+        <strong>How to fix:</strong><br>
+        Please load this page over <strong>HTTPS</strong> or run it locally as <strong>localhost</strong> (e.g. <code style="color: var(--warning); font-family: monospace;">http://localhost:8000</code>).
+      </div>
+    </div>
+    
+    <!-- Top Header -->
+    <header>
+      <div class="brand-section">
+        <div class="brand-icon">E</div>
+        <div class="brand-title">
+          <h1>e-Paper Console</h1>
+          <span>Web Bluetooth Client</span>
+        </div>
+      </div>
+      <button id="btn-pair" class="btn-connect">
+        <span class="pulse-ring"></span>
+        <span id="pair-text">Pair Device</span>
+      </button>
+    </header>
+
+    <!-- UI Overlay Wrap -->
+    <div id="ui-wrapper" class="disabled-overlay">
+      
+      <!-- Telemetry Dashboard -->
+      <section class="card">
+        <div class="card-title">
+          <span class="btn-icon">📊</span> Device Statistics
+        </div>
+        
+        <div class="telemetry-grid">
+          <div class="tel-item">
+            <span class="tel-icon">🔋</span>
+            <span class="tel-label">Battery</span>
+            <span id="stat-bat" class="tel-val">--%</span>
+          </div>
+          <div class="tel-item">
+            <span class="tel-icon">⚡</span>
+            <span class="tel-label">Voltage</span>
+            <span id="stat-volt" class="tel-val">-.-- V</span>
+          </div>
+          <div class="tel-item">
+            <span class="tel-icon">📶</span>
+            <span class="tel-label">Signal</span>
+            <span id="stat-rssi" class="tel-val">-- dBm</span>
+          </div>
+        </div>
+
+        <div class="storage-container">
+          <div class="storage-header">
+            <span>Storage Usage</span>
+            <span id="storage-numerical">-- KB / -- KB</span>
+          </div>
+          <div class="progress-bar-container">
+            <div id="storage-bar" class="progress-bar-fill"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Remote Control Pad -->
+      <section class="controls-layout">
+        
+        <!-- Onboard Button Simulation Grid -->
+        <div class="card">
+          <div class="card-title">
+            <span class="btn-icon">🕹️</span> Sim Button Clicks
+          </div>
+          <div class="touch-grid">
+            <button id="btn-prev" class="touch-btn">
+              <span class="btn-icon">◀️</span>
+              <span>Prev</span>
+            </button>
+            <button id="btn-next" class="touch-btn">
+              <span class="btn-icon">▶️</span>
+              <span>Next</span>
+            </button>
+            <button id="btn-select" class="touch-btn double">
+              <span class="btn-icon">🟢</span>
+              <span>Select Click</span>
+            </button>
+            <button id="btn-select-long" class="touch-btn double accent">
+              <span class="btn-icon">🔘</span>
+              <span>Select Long Press</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Dedicated Page turns column -->
+        <div class="card">
+          <div class="card-title">
+            <span class="btn-icon">📖</span> Remote Page Control
+          </div>
+          <div class="touch-grid">
+            <button id="btn-page-prev" class="touch-btn accent">
+              <span class="btn-icon">⏮️</span>
+              <span>Previous Page</span>
+            </button>
+            <button id="btn-page-next" class="touch-btn accent">
+              <span class="btn-icon">⏭️</span>
+              <span>Next Page</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Stored Bookshelf -->
+      <section class="card" style="margin-top: 16px;">
+        <div class="card-title" style="justify-content: space-between; align-items: center;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="btn-icon">📚</span> Stored Bookshelf
+          </div>
+          <button id="btn-refresh-books" class="touch-btn" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; flex-direction: row; gap: 4px;">
+            <span>🔄</span> Refresh
+          </button>
+        </div>
+        <div id="bookshelf-list" class="books-scroll">
+          <div class="no-books">No books loaded or loaded catalog is empty. Click Refresh.</div>
+        </div>
+      </section>
+
+      <!-- Book Wireless Stream Uploader -->
+      <section class="card" style="margin-top: 16px;">
+        <div class="card-title">
+          <span class="btn-icon">📤</span> Wireless Book Uploader
+        </div>
+        
+        <div id="upload-dropzone" class="upload-zone">
+          <span class="upload-icon">📄</span>
+          <div class="upload-text">
+            <h4>Select book text file</h4>
+            <p>Supports .txt files up to 64KB</p>
+          </div>
+          <input type="file" id="local-file-input" class="file-input" accept=".txt">
+        </div>
+
+        <div id="upload-form" class="upload-form" style="display: none;">
+          <input type="text" id="upload-title" class="input-field" placeholder="Enter book title">
+          <button id="btn-trigger-upload" class="btn-upload">Start Streaming Book</button>
+        </div>
+
+        <div id="upload-progress-container" class="upload-progress-container">
+          <div class="upload-progress-header">
+            <span id="upload-progress-status">Uploading chunks...</span>
+            <span id="upload-progress-percent">0%</span>
+          </div>
+          <div class="progress-bar-container">
+            <div id="upload-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+          </div>
+          <div class="upload-progress-details">
+            <span id="upload-progress-bytes">0 / 0 bytes</span>
+            <span>Delay: 15ms pacing</span>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- End Wrapper -->
+
+    <!-- Monospaced Log Console Card -->
+    <section class="card console-card">
+      <div id="console-header" class="console-header">
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 0.9rem;">
+          <span class="btn-icon">📟</span> Serial Console Logs
+        </div>
+        <span id="console-toggle" class="console-toggle">Show Logs</span>
+      </div>
+      <div id="console-terminal" class="console-terminal">
+        <div class="console-line info">[SYS] Interactive terminal logging initialized. Pair device to stream data.</div>
+      </div>
+    </section>
+
+  </div><!-- End Container -->
+
+  <!-- Toast Notification Wrapper -->
+  <div id="toast" class="toast">
+    <span id="toast-icon">💡</span>
+    <span id="toast-text">Feedback ready</span>
+  </div>
+
+  <script>
+    // UUID configurations
+    const NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const NUS_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+    const NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+    // Application state variables
+    let device = null;
+    let rxChar = null;
+    let txChar = null;
+    let lineBuffer = "";
+    
+    // Accumulators for Promise-based handshakes
+    let responseResolver = null;
+    let listMode = false;
+    let listAccumulator = [];
+
+    // DOM Elements
+    const btnPair = document.getElementById('btn-pair');
+    const pairText = document.getElementById('pair-text');
+    const uiWrapper = document.getElementById('ui-wrapper');
+    const toast = document.getElementById('toast');
+    const toastText = document.getElementById('toast-text');
+    const toastIcon = document.getElementById('toast-icon');
+
+    // Stats UI Elements
+    const statBat = document.getElementById('stat-bat');
+    const statVolt = document.getElementById('stat-volt');
+    const statRssi = document.getElementById('stat-rssi');
+    const storageNumerical = document.getElementById('storage-numerical');
+    const storageBar = document.getElementById('storage-bar');
+
+    // Button Simulation
+    const btnPrev = document.getElementById('btn-prev');
+    const btnNext = document.getElementById('btn-next');
+    const btnSelect = document.getElementById('btn-select');
+    const btnSelectLong = document.getElementById('btn-select-long');
+
+    // Page control
+    const btnPagePrev = document.getElementById('btn-page-prev');
+    const btnPageNext = document.getElementById('btn-page-next');
+    const btnRefreshBooks = document.getElementById('btn-refresh-books');
+    const bookshelfList = document.getElementById('bookshelf-list');
+
+    // Uploader UI Elements
+    const uploadDropzone = document.getElementById('upload-dropzone');
+    const localFileInput = document.getElementById('local-file-input');
+    const uploadForm = document.getElementById('upload-form');
+    const uploadTitle = document.getElementById('upload-title');
+    const btnTriggerUpload = document.getElementById('btn-trigger-upload');
+    const uploadProgressContainer = document.getElementById('upload-progress-container');
+    const uploadProgressStatus = document.getElementById('upload-progress-status');
+    const uploadProgressPercent = document.getElementById('upload-progress-percent');
+    const uploadProgressBar = document.getElementById('upload-progress-bar');
+    const uploadProgressBytes = document.getElementById('upload-progress-bytes');
+
+    // Console Logging UI
+    const consoleHeader = document.getElementById('console-header');
+    const consoleToggle = document.getElementById('console-toggle');
+    const consoleTerminal = document.getElementById('console-terminal');
+
+    let isConsoleOpen = false;
+    let selectedFileContent = null;
+    let uploadInProgress = false;
+
+    // Toast Notification helper
+    function showToast(message, type = 'info', icon = '💡') {
+      toastText.innerText = message;
+      toastIcon.innerText = icon;
+      toast.className = 'toast';
+      if (type === 'success') toast.classList.add('success');
+      if (type === 'danger') toast.classList.add('danger');
+      
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 3000);
+    }
+
+    // Monospaced Logging
+    function logConsole(message, type = 'rx') {
+      const line = document.createElement('div');
+      line.className = `console-line ${type}`;
+      
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      line.innerText = `[${time}] ${message}`;
+      
+      consoleTerminal.appendChild(line);
+      consoleTerminal.scrollTop = consoleTerminal.scrollHeight;
+    }
+
+    // Toggle log view
+    consoleHeader.addEventListener('click', () => {
+      isConsoleOpen = !isConsoleOpen;
+      if (isConsoleOpen) {
+        consoleTerminal.style.display = 'block';
+        consoleToggle.innerText = 'Hide Logs';
+      } else {
+        consoleTerminal.style.display = 'none';
+        consoleToggle.innerText = 'Show Logs';
+      }
+    });
+
+    // Pair and Connect logic
+    btnPair.addEventListener('click', async () => {
+      // 1. Direct Web Bluetooth compatibility check
+      if (!navigator.bluetooth) {
+        const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+        const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
+        const isAndroid = /android/i.test(userAgent);
+        
+        let msg = "Web Bluetooth is not supported or is disabled because this page is not running in a Secure Context (HTTPS or localhost).\n\n";
+        if (isIOS) {
+          msg += "On iOS (iPhone/iPad), standard Safari does not support Web Bluetooth. Please download the 'Bluefy' browser from the App Store and load this URL inside it.";
+        } else if (isAndroid) {
+          msg += `On Android Chrome, you must treat this local Wi-Fi origin as secure.\n\nTo fix this:\n1. Open a new Chrome tab and go to:\n   chrome://flags/#unsafely-treat-insecure-origin-as-secure\n2. Set the flag to Enabled.\n3. Paste the following origin address in the text field:\n   ${window.location.origin}\n4. Tap 'Relaunch' at the bottom of the screen.\n5. Reload this page and tap Pair Device.`;
+        } else {
+          msg += "Please host this page using HTTPS or access it via http://localhost:8000.";
+        }
+        alert(msg);
+        return;
+      }
+
+      if (device && device.gatt.connected) {
+        logConsole("Disconnecting from device...", 'info');
+        device.gatt.disconnect();
+        return;
+      }
+
+      try {
+        logConsole("Requesting e-Paper Reader Bluetooth device...", 'info');
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: 'nRF_E' }],
+          optionalServices: [NUS_SERVICE_UUID]
+        });
+
+        device.addEventListener('gattserverdisconnected', onDisconnected);
+
+        logConsole(`Connecting to GATT Server [${device.name}]...`, 'info');
+        pairText.innerText = "Connecting...";
+        const server = await device.gatt.connect();
+
+        logConsole("Discovering Nordic UART Service...", 'info');
+        const service = await server.getPrimaryService(NUS_SERVICE_UUID);
+
+        logConsole("Retrieving GATT Characteristics...", 'info');
+        rxChar = await service.getCharacteristic(NUS_RX_CHAR_UUID);
+        txChar = await service.getCharacteristic(NUS_TX_CHAR_UUID);
+
+        logConsole("Subscribing to UART notifications...", 'info');
+        await txChar.startNotifications();
+        txChar.addEventListener('characteristicvaluechanged', onNotificationReceived);
+
+        onConnected();
+      } catch (err) {
+        logConsole(`Connection failed: ${err.message}`, 'err');
+        showToast("Connection failed", "danger", "❌");
+        pairText.innerText = "Pair Device";
+      }
+    });
+
+    function onConnected() {
+      showToast("Connected successfully!", "success", "⚡");
+      btnPair.classList.add('connected');
+      pairText.innerText = "Connected";
+      uiWrapper.classList.add('enabled');
+      logConsole("Connected to nice!nano reader over BLE.", 'info');
+      
+      // Fetch initial device info
+      setTimeout(fetchStats, 500);
+      setTimeout(fetchBooks, 1200);
+    }
+
+    function onDisconnected() {
+      showToast("Device disconnected", "danger", "🔌");
+      btnPair.classList.remove('connected');
+      pairText.innerText = "Pair Device";
+      uiWrapper.classList.remove('enabled');
+      logConsole("BLE connection closed.", 'info');
+      
+      device = null;
+      rxChar = null;
+      txChar = null;
+      uploadInProgress = false;
+      uploadProgressContainer.style.display = 'none';
+      
+      // Clear indicators
+      statBat.innerText = "--%";
+      statVolt.innerText = "-.-- V";
+      statRssi.innerText = "-- dBm";
+      storageNumerical.innerText = "-- KB / -- KB";
+      storageBar.style.width = "0%";
+    }
+
+    // Packet payload parser
+    function onNotificationReceived(event) {
+      const dataView = event.target.value;
+      const chunk = new TextDecoder().decode(dataView);
+      lineBuffer += chunk;
+      
+      while (lineBuffer.includes("\n")) {
+        const parts = lineBuffer.split("\n");
+        const line = parts.shift().trim();
+        lineBuffer = parts.join("\n");
+        
+        if (line) {
+          logConsole(line, 'rx');
+          handleIncomingProtocolLine(line);
+        }
+      }
+    }
+
+    // Command-Response protocol engine
+    function handleIncomingProtocolLine(line) {
+      // Bookshelf listing block
+      if (line === "LIST_START") {
+        listMode = true;
+        listAccumulator = [];
+        return;
+      } else if (line === "LIST_END") {
+        listMode = false;
+        if (responseResolver) {
+          responseResolver(listAccumulator);
+          responseResolver = null;
+        }
+        return;
+      }
+
+      if (listMode) {
+        listAccumulator.push(line);
+        return;
+      }
+
+      // Device stats response
+      if (line.startsWith("STATS:")) {
+        parseAndRenderStats(line.substring(6));
+        if (responseResolver) {
+          responseResolver(line);
+          responseResolver = null;
+        }
+        return;
+      }
+
+      // File upload complete triggers
+      if (line === "UPLOAD_SUCCESS" || line === "UPLOAD_FAILED" || line === "UPLOAD_TIMEOUT") {
+        if (uploadInProgress && responseResolver) {
+          responseResolver(line);
+          responseResolver = null;
+        }
+        return;
+      }
+
+      // Fallback single line resolver
+      if (responseResolver) {
+        responseResolver(line);
+        responseResolver = null;
+      }
+    }
+
+    // Send NUS write packets in 20-byte paced boundaries
+    async function sendCommand(cmdStr, waitResponse = true) {
+      if (!rxChar) {
+        showToast("Not connected to BLE", "danger", "🔌");
+        return null;
+      }
+
+      logConsole(`Writing command: ${cmdStr}`, 'tx');
+      const payload = new TextEncoder().encode(cmdStr + "\n");
+      const chunkSize = 20;
+
+      // Reset promise resolver for blocking replies
+      let responsePromise = null;
+      if (waitResponse) {
+        responsePromise = new Promise((resolve) => {
+          responseResolver = resolve;
+          // Set a fallback guard timeout of 6 seconds
+          setTimeout(() => {
+            if (responseResolver) {
+              logConsole("Handshake response timed out.", 'err');
+              responseResolver(null);
+              responseResolver = null;
+            }
+          }, 6000);
+        });
+      }
+
+      for (let i = 0; i < payload.length; i += chunkSize) {
+        const chunk = payload.slice(i, i + chunkSize);
+        await rxChar.writeValueWithoutResponse(chunk);
+        // Pacing delay (5ms)
+        await new Promise(r => setTimeout(r, 5));
+      }
+
+      if (!waitResponse) {
+        return "BTN_SUCCESS";
+      }
+
+      return responsePromise;
+    }
+
+    // Fetch and draw Stats
+    async function fetchStats() {
+      const res = await sendCommand("CMD_STATS");
+      if (!res) {
+        showToast("Failed to fetch metrics", "danger", "📊");
+      }
+    }
+
+    function parseAndRenderStats(statsRaw) {
+      const stats = {};
+      statsRaw.split("|").forEach(part => {
+        if (part.includes("=")) {
+          const [k, v] = part.split("=");
+          stats[k] = v;
+        }
+      });
+
+      const vbat = stats.vbat || "0.0";
+      const percent = stats.percent || "0";
+      const rssi = stats.rssi || "0";
+      const used = parseInt(stats.used || "0");
+      const total = parseInt(stats.total || "235520");
+      const free = total - used;
+
+      statBat.innerText = `${percent}%`;
+      statVolt.innerText = `${vbat} V`;
+      statRssi.innerText = `${rssi} dBm`;
+
+      storageNumerical.innerText = `${(used / 1024).toFixed(1)} KB / ${(total / 1024).toFixed(1)} KB`;
+      const fillPercent = (used / total) * 100;
+      storageBar.style.width = `${fillPercent}%`;
+    }
+
+    // Refresh and build catalog list
+    async function fetchBooks() {
+      bookshelfList.innerHTML = `<div class="no-books">Loading catalog from device flash...</div>`;
+      const list = await sendCommand("CMD_LIST");
+      bookshelfList.innerHTML = "";
+
+      if (!list || list.length === 0) {
+        bookshelfList.innerHTML = `<div class="no-books">No books stored in Flash.<br>Use the Uploader below.</div>`;
+        return;
+      }
+
+      list.forEach(line => {
+        if (line.includes(":")) {
+          const [filename, bytes] = line.split(":");
+          const sizeKb = (parseInt(bytes) / 1024).toFixed(1);
+          const cleanName = filename.replace(".txt", "").replace(/_/g, " ");
+
+          const item = document.createElement('div');
+          item.className = 'book-item';
+          item.innerHTML = `
+            <div class="book-info">
+              <span class="book-name">${cleanName}</span>
+              <span class="book-size">${sizeKb} KB</span>
+            </div>
+            <button class="btn-delete" title="Delete book">🗑️</button>
+          `;
+
+          // Delete click listener
+          item.querySelector('.btn-delete').addEventListener('click', async () => {
+            if (confirm(`Permanently delete book "${cleanName}" from flash?`)) {
+              showToast(`Deleting book...`, 'info', '🗑️');
+              const delRes = await sendCommand(`CMD_DELETE:${filename}`);
+              if (delRes && delRes.startsWith("DELETE_SUCCESS:")) {
+                showToast("Deleted successfully!", "success", "✅");
+                fetchBooks();
+                setTimeout(fetchStats, 500);
+              } else {
+                showToast("Failed to delete book", "danger", "❌");
+              }
+            }
+          });
+
+          bookshelfList.appendChild(item);
+        }
+      });
+    }
+
+    btnRefreshBooks.addEventListener('click', fetchBooks);
+
+    // Simulated button keypad triggers
+    btnPrev.addEventListener('click', () => sendCommand("CMD_BTN_PREV", false));
+    btnNext.addEventListener('click', () => sendCommand("CMD_BTN_NEXT", false));
+    btnSelect.addEventListener('click', () => sendCommand("CMD_BTN_SELECT", false));
+    btnSelectLong.addEventListener('click', () => sendCommand("CMD_BTN_SELECT_LONG", false));
+
+    // Remote Page Turn commands
+    btnPagePrev.addEventListener('click', () => sendCommand("CMD_PAGE_PREV", false));
+    btnPageNext.addEventListener('click', () => sendCommand("CMD_PAGE_NEXT", false));
+
+    // Drag-and-drop & File Selection triggers
+    uploadDropzone.addEventListener('click', () => localFileInput.click());
+    
+    uploadDropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadDropzone.classList.add('dragover');
+    });
+
+    uploadDropzone.addEventListener('dragleave', () => {
+      uploadDropzone.classList.remove('dragover');
+    });
+
+    uploadDropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadDropzone.classList.remove('dragover');
+      if (e.dataTransfer.files.length > 0) {
+        handleFileSelection(e.dataTransfer.files[0]);
+      }
+    });
+
+    localFileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        handleFileSelection(e.target.files[0]);
+      }
+    });
+
+    function handleFileSelection(file) {
+      if (uploadInProgress) return;
+      if (!file.name.endsWith('.txt')) {
+        showToast("Please select a plain .txt file", "danger", "⚠️");
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = function(evt) {
+        selectedFileContent = evt.target.result;
+        
+        // Auto parse first line for title
+        const lines = selectedFileContent.split('\n');
+        let parsedTitle = "My Novel";
+        if (lines.length > 0 && lines[0].trim()) {
+          parsedTitle = lines[0].trim().substring(0, 32); // max 32 chars
+        }
+        
+        uploadTitle.value = parsedTitle;
+        uploadForm.style.display = 'flex';
+        logConsole(`Selected file: ${file.name} (${selectedFileContent.length} bytes)`, 'info');
+      };
+      reader.readAsText(file);
+    }
+
+    // High-speedpaced chunked streaming engine
+    btnTriggerUpload.addEventListener('click', async () => {
+      if (uploadInProgress || !selectedFileContent) return;
+
+      const title = uploadTitle.value.trim().replace(/[:\n\r]/g, ""); // strip format break boundaries
+      if (!title) {
+        showToast("Please enter a book title", "danger", "✏️");
+        return;
+      }
+
+      uploadInProgress = true;
+      uploadForm.style.display = 'none';
+      uploadProgressContainer.style.display = 'block';
+      uploadProgressStatus.innerText = "Initializing upload handshake...";
+      uploadProgressPercent.innerText = "0%";
+      uploadProgressBar.style.width = "0%";
+      
+      const payload = new TextEncoder().encode(selectedFileContent);
+      const payloadSize = payload.length;
+      uploadProgressBytes.innerText = `0 / ${payloadSize} bytes`;
+
+      try {
+        // 1. Send upload init handshake
+        logConsole(`Initiating upload handshake for title: ${title} (${payloadSize} bytes)...`, 'info');
+        const initRes = await sendCommand(`CMD_UPLOAD:${payloadSize}:${title}`);
+        if (initRes !== "UPLOAD_READY") {
+          throw new Error(`Upload initialization rejected: ${initRes}`);
+        }
+
+        // 2. Stream chunk payload
+        logConsole("Handshake ready! Streaming chunks under 15ms intervals...", 'info');
+        uploadProgressStatus.innerText = "Streaming book chunks...";
+        
+        const chunkSize = 20;
+        let bytesSent = 0;
+
+        // Configure future to wait for UPLOAD_SUCCESS
+        const finalizePromise = new Promise((resolve) => {
+          responseResolver = resolve;
+          // Set 12 second save timeout
+          setTimeout(() => {
+            if (responseResolver) {
+              responseResolver("TIMEOUT");
+              responseResolver = null;
+            }
+          }, 12000);
+        });
+
+        for (let i = 0; i < payloadSize; i += chunkSize) {
+          if (!device || !device.gatt.connected) {
+            throw new Error("Device disconnected during transfer.");
+          }
+          const chunk = payload.slice(i, i + chunkSize);
+          await rxChar.writeValueWithoutResponse(chunk);
+          bytesSent += chunk.length;
+
+          const pct = Math.min((bytesSent / payloadSize) * 100, 100);
+          uploadProgressPercent.innerText = `${Math.round(pct)}%`;
+          uploadProgressBar.style.width = `${pct}%`;
+          uploadProgressBytes.innerText = `${bytesSent} / ${payloadSize} bytes`;
+
+          // 15ms chunk delay pacing for write loop
+          await new Promise(r => setTimeout(r, 15));
+        }
+
+        logConsole("Stream finished. finalising sector writes on device...", 'info');
+        uploadProgressStatus.innerText = "Finalizing sector save...";
+
+        // 3. Wait for final save response
+        const finalizeRes = await finalizePromise;
+        if (finalizeRes === "UPLOAD_SUCCESS") {
+          logConsole("Upload completed and saved successfully!", 'info');
+          showToast("Book uploaded successfully!", "success", "🎉");
+          
+          // Refresh statistics and file list
+          fetchBooks();
+          setTimeout(fetchStats, 800);
+        } else {
+          throw new Error(`Device failed to save book: ${finalizeRes}`);
+        }
+      } catch (err) {
+        logConsole(`Upload failed: ${err.message}`, 'err');
+        showToast(`Upload failed: ${err.message}`, "danger", "❌");
+      } finally {
+        uploadInProgress = false;
+        uploadProgressContainer.style.display = 'none';
+        selectedFileContent = null;
+        localFileInput.value = "";
+      }
+    });
+
+    // 4. Web Bluetooth Availability & Secure Context Compatibility Scanner
+    window.addEventListener('DOMContentLoaded', () => {
+      if (!navigator.bluetooth) {
+        const warningBanner = document.getElementById('secure-context-warning');
+        if (warningBanner) {
+          warningBanner.style.display = 'block';
+          
+          // Determine the user's operating system/device class
+          const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+          const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
+          const isAndroid = /android/i.test(userAgent);
+          
+          if (isIOS) {
+            document.getElementById('ios-instruction').style.display = 'block';
+          } else if (isAndroid) {
+            document.getElementById('android-instruction').style.display = 'block';
+            const originSpan = document.getElementById('origin-placeholder');
+            if (originSpan) {
+              originSpan.innerText = window.location.origin;
+            }
+          } else {
+            document.getElementById('general-instruction').style.display = 'block';
+          }
+        }
+        
+        // Adapt styling of Pair button to show non-functional status
+        if (btnPair) {
+          btnPair.style.background = 'rgba(239, 68, 68, 0.15)';
+          btnPair.style.border = '1px solid var(--danger)';
+          btnPair.style.color = 'var(--danger)';
+          btnPair.style.boxShadow = 'none';
+          if (pairText) pairText.innerText = "Bluetooth Error";
+          const pulseRing = document.querySelector('.pulse-ring');
+          if (pulseRing) pulseRing.style.display = 'none';
+        }
+        logConsole("Web Bluetooth is disabled or unsupported. Secure context or compliant browser required.", "err");
+      } else {
+        logConsole("Web Bluetooth API is available and secure context is active.", "info");
+      }
+    });
+
+  </script>
+</body>
+</html>
