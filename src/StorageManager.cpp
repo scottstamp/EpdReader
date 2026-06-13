@@ -1,6 +1,8 @@
 #include "StorageManager.h"
 #include "Config.h"
 
+#include "DisplayManager.h"
+
 using namespace Adafruit_LittleFS_Namespace;
 
 StorageManager& StorageManager::getInstance() {
@@ -128,7 +130,6 @@ uint32_t StorageManager::getUsedSpace() {
 }
 
 bool StorageManager::writeProgress(const String& currentBook, uint32_t offset) {
-    // Delete file first to guarantee full truncation and prevent trailing digit corruption
     if (InternalFS.exists(PROGRESS_FILE)) {
         InternalFS.remove(PROGRESS_FILE);
     }
@@ -139,9 +140,17 @@ bool StorageManager::writeProgress(const String& currentBook, uint32_t offset) {
         return false;
     }
     
-    // Simple progress format: BookFilename\nOffset
     progressFile.println(currentBook);
     progressFile.println(offset);
+
+    // Save history offsets
+    uint32_t hist[HISTORY_SIZE];
+    int count = DisplayManager::getInstance().getHistoryOffsets(hist, HISTORY_SIZE);
+    progressFile.println(count);
+    for (int i = 0; i < count; i++) {
+        progressFile.println(hist[i]);
+    }
+
     progressFile.close();
     return true;
 }
@@ -169,9 +178,49 @@ bool StorageManager::readProgress(String& currentBook, uint32_t& offset) {
     return true;
 }
 
+bool StorageManager::readProgress(String& currentBook, uint32_t& offset, uint32_t* historyDest, int maxHistoryLen, int& historyCount) {
+    if (!InternalFS.exists(PROGRESS_FILE)) {
+        currentBook = "";
+        offset = 0;
+        historyCount = 0;
+        return false;
+    }
+
+    File progressFile = InternalFS.open(PROGRESS_FILE, FILE_O_READ);
+    if (!progressFile) {
+        historyCount = 0;
+        return false;
+    }
+
+    currentBook = progressFile.readStringUntil('\n');
+    currentBook.trim();
+    
+    String offsetStr = progressFile.readStringUntil('\n');
+    offsetStr.trim();
+    offset = offsetStr.toInt();
+    
+    historyCount = 0;
+    if (progressFile.available()) {
+        String countStr = progressFile.readStringUntil('\n');
+        countStr.trim();
+        int count = countStr.toInt();
+        for (int i = 0; i < count; i++) {
+            if (progressFile.available()) {
+                String valStr = progressFile.readStringUntil('\n');
+                valStr.trim();
+                if (i < maxHistoryLen) {
+                    historyDest[historyCount++] = valStr.toInt();
+                }
+            }
+        }
+    }
+    
+    progressFile.close();
+    return true;
+}
+
 bool StorageManager::writeBookmark(const String& filename, uint32_t offset) {
     String path = String(BOOK_DIR) + "/" + filename + ".bmk";
-    // Delete file first to guarantee full truncation and prevent trailing digit corruption
     if (InternalFS.exists(path.c_str())) {
         InternalFS.remove(path.c_str());
     }
@@ -182,6 +231,15 @@ bool StorageManager::writeBookmark(const String& filename, uint32_t offset) {
         return false;
     }
     progressFile.println(offset);
+
+    // Save history offsets
+    uint32_t hist[HISTORY_SIZE];
+    int count = DisplayManager::getInstance().getHistoryOffsets(hist, HISTORY_SIZE);
+    progressFile.println(count);
+    for (int i = 0; i < count; i++) {
+        progressFile.println(hist[i]);
+    }
+
     progressFile.close();
     return true;
 }
@@ -199,6 +257,42 @@ bool StorageManager::readBookmark(const String& filename, uint32_t& offset) {
     String offsetStr = progressFile.readStringUntil('\n');
     offsetStr.trim();
     offset = offsetStr.toInt();
+    progressFile.close();
+    return true;
+}
+
+bool StorageManager::readBookmark(const String& filename, uint32_t& offset, uint32_t* historyDest, int maxHistoryLen, int& historyCount) {
+    String path = String(BOOK_DIR) + "/" + filename + ".bmk";
+    if (!InternalFS.exists(path.c_str())) {
+        offset = 0;
+        historyCount = 0;
+        return false;
+    }
+    File progressFile = InternalFS.open(path.c_str(), FILE_O_READ);
+    if (!progressFile) {
+        historyCount = 0;
+        return false;
+    }
+    String offsetStr = progressFile.readStringUntil('\n');
+    offsetStr.trim();
+    offset = offsetStr.toInt();
+    
+    historyCount = 0;
+    if (progressFile.available()) {
+        String countStr = progressFile.readStringUntil('\n');
+        countStr.trim();
+        int count = countStr.toInt();
+        for (int i = 0; i < count; i++) {
+            if (progressFile.available()) {
+                String valStr = progressFile.readStringUntil('\n');
+                valStr.trim();
+                if (i < maxHistoryLen) {
+                    historyDest[historyCount++] = valStr.toInt();
+                }
+            }
+        }
+    }
+    
     progressFile.close();
     return true;
 }

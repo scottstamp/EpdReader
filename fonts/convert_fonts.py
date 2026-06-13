@@ -3,21 +3,22 @@ from PIL import Image, ImageDraw, ImageFont
 
 def convert_font(font_path, pixel_size, font_name_c):
     try:
-        font = ImageFont.truetype(font_path, pixel_size)
+        font1x = ImageFont.truetype(font_path, pixel_size)
+        font3x = ImageFont.truetype(font_path, pixel_size * 3)
     except Exception as e:
         print(f"Error loading font {font_path}: {e}")
         return None
 
     # Get line spacing (yAdvance)
-    ascent, descent = font.getmetrics()
+    ascent, descent = font1x.getmetrics()
     yAdvance = ascent + descent
     print(f"Font: {font_name_c}, Pixel Size: {pixel_size}, ascent: {ascent}, descent: {descent}, yAdvance: {yAdvance}")
 
-    # Pre-pass to find base_bottom using 'v', 'w', 'x', 'z'
+    # Pre-pass to find base_bottom using 'v', 'w', 'x', 'z' at 1x
     flat_bottoms = []
     for char in ['v', 'w', 'x', 'z']:
         try:
-            mask, offset = font.getmask2(char, mode="1", anchor="ls")
+            mask, offset = font1x.getmask2(char, mode="1", anchor="ls")
             w, h = mask.size
             last_row = -1
             for y in range(h):
@@ -42,27 +43,58 @@ def convert_font(font_path, pixel_size, font_name_c):
     glyphs = []
     current_offset = 0
     
-    for code in range(32, 127):
-        char = chr(code)
-        mask, offset = font.getmask2(char, mode="1", anchor="ls")
-        width, height = mask.size
+    chars_to_convert = [(code, chr(code)) for code in range(32, 127)]
+    chars_to_convert.append((127, '—')) # em dash
+    chars_to_convert.append((128, '“')) # left double quote
+    chars_to_convert.append((129, '”')) # right double quote
+    chars_to_convert.append((130, '’')) # right single quote / apostrophe
+    chars_to_convert.append((131, '…')) # ellipsis
+    
+    try:
+        LANCZOS = Image.Resampling.LANCZOS
+    except AttributeError:
+        LANCZOS = Image.LANCZOS
+
+    # Coverage threshold to adjust stroke thickness (boldness)
+    # Lower threshold = bolder font, higher threshold = thinner font
+    THRESHOLD = 110
+
+    for code, char in chars_to_convert:
+        mask3x, offset3x = font3x.getmask2(char, mode="L", anchor="ls")
+        w3x, h3x = mask3x.size
         
-        if width == 0 or height == 0:
+        if w3x == 0 or h3x == 0:
             width = 0
             height = 0
             xOffset = 0
             yOffset = 0
-            xAdvance = int(round(font.getlength(char)))
+            xAdvance = int(round(font1x.getlength(char)))
             pixels = []
         else:
-            xOffset, yOffset = offset
-            xAdvance = int(round(font.getlength(char)))
+            # Scale down offsets and advances
+            xOffset = int(round(offset3x[0] / 3.0))
+            yOffset = int(round(offset3x[1] / 3.0))
+            xAdvance = int(round(font3x.getlength(char) / 3.0))
+            
+            # Convert 3x mask to image and resize using Lanczos
+            img3x = Image.frombytes("L", (w3x, h3x), bytes(mask3x))
+            width = max(1, int(round(w3x / 3.0)))
+            height = max(1, int(round(h3x / 3.0)))
+            
+            img1x = img3x.resize((width, height), resample=LANCZOS)
+            
+            # Apply threshold to construct 1-bit pixels
+            pixels = []
+            for y in range(height):
+                for x in range(width):
+                    val = img1x.getpixel((x, y))
+                    pixels.append(255 if val > THRESHOLD else 0)
             
             # Find actual bottom of non-zero pixels
             last_row = -1
             for y in range(height):
                 for x in range(width):
-                    if mask.getpixel((x, y)) > 0:
+                    if pixels[y * width + x] > 0:
                         last_row = y
                         break
             
@@ -71,11 +103,6 @@ def convert_font(font_path, pixel_size, font_name_c):
                 if pixel_bottom < base_bottom:
                     shift = base_bottom - pixel_bottom
                     yOffset += shift
-                    
-            pixels = []
-            for y in range(height):
-                for x in range(width):
-                    pixels.append(mask.getpixel((x, y)))
             
         # Pack bits
         glyph_bytes = []
@@ -134,7 +161,7 @@ def convert_font(font_path, pixel_size, font_name_c):
     out.append(f"const GFXfont {font_name_c} PROGMEM = {{")
     out.append(f"    (uint8_t *){font_name_c}Bitmaps,")
     out.append(f"    (GFXglyph *){font_name_c}Glyphs,")
-    out.append("    0x20, 0x7E,")
+    out.append(f"    0x20, 0x{glyphs[-1]['code']:02X},")
     out.append(f"    {yAdvance}")
     out.append("};")
     
@@ -147,7 +174,7 @@ def main():
     # Fonts configuration: (source_ttf, pixel_size, output_c_name, output_h_filename)
     font_configs = [
         # Bookerly Regular versions
-        ("Bookerly.ttf", 14, "Bookerly9pt7b", "Bookerly9pt7b.h"),
+        ("Bookerly.ttf", 15, "Bookerly9pt7b", "Bookerly9pt7b.h"),
         ("Bookerly.ttf", 18, "Bookerly12pt7b", "Bookerly12pt7b.h"),
         ("Bookerly.ttf", 26, "Bookerly18pt7b", "Bookerly18pt7b.h"),
         # Bookerly Bold version for menus
@@ -157,7 +184,11 @@ def main():
         ("Literata-Regular.ttf", 18, "Literata12pt7b", "Literata12pt7b.h"),
         ("Literata-Regular.ttf", 26, "Literata18pt7b", "Literata18pt7b.h"),
         # Amazon Ember Medium version for menus
-        ("Amazon-Ember-Medium.ttf", 14, "AmazonEmber_Medium9pt7b", "AmazonEmber_Medium9pt7b.h")
+        ("Amazon-Ember-Medium.ttf", 14, "AmazonEmber_Medium9pt7b", "AmazonEmber_Medium9pt7b.h"),
+        # Atkinson Hyperlegible Next Regular versions
+        ("AtkinsonHyperlegibleNext-Regular.otf", 14, "AtkinsonHyperlegibleNext9pt7b", "AtkinsonHyperlegibleNext9pt7b.h"),
+        ("AtkinsonHyperlegibleNext-Regular.otf", 18, "AtkinsonHyperlegibleNext12pt7b", "AtkinsonHyperlegibleNext12pt7b.h"),
+        ("AtkinsonHyperlegibleNext-Regular.otf", 26, "AtkinsonHyperlegibleNext18pt7b", "AtkinsonHyperlegibleNext18pt7b.h")
     ]
     
     for ttf_file, size, name_c, h_file in font_configs:

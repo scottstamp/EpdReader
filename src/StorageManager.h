@@ -15,8 +15,10 @@ public:
     bool deleteBook(const String& filename);
     bool writeProgress(const String& currentBook, uint32_t offset);
     bool readProgress(String& currentBook, uint32_t& offset);
+    bool readProgress(String& currentBook, uint32_t& offset, uint32_t* historyDest, int maxHistoryLen, int& historyCount);
     bool writeBookmark(const String& filename, uint32_t offset);
     bool readBookmark(const String& filename, uint32_t& offset);
+    bool readBookmark(const String& filename, uint32_t& offset, uint32_t* historyDest, int maxHistoryLen, int& historyCount);
     uint32_t getUsedSpace();
     
     // File I/O helpers

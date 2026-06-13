@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+import ctypes
 from typing import Any
 from bless import (
     BlessServer,
@@ -21,6 +22,12 @@ NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e" # Client receive (notify), 
 
 BOOKS_DIR = "./books"
 
+def is_admin() -> bool:
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except:
+        return False
+
 class BookServer:
     def __init__(self):
         self.server = None
@@ -31,7 +38,18 @@ class BookServer:
 
     async def start(self):
         self.loop = asyncio.get_running_loop()
-        self.server = BlessServer(name="EpdBookServer")
+        
+        # Windows requires Administrator privileges to rename the local BLE adapter name
+        if sys.platform == "win32" and is_admin():
+            logger.info("Running with Administrator privileges. Enabling BLE adapter name overwrite to 'EpdBookServer'...")
+            self.server = BlessServer(name="EpdBookServer", name_overwrite=True)
+        else:
+            if sys.platform == "win32":
+                logger.info(
+                    "Running without Administrator privileges. The BLE server will advertise under your computer's default name. "
+                    "To advertise explicitly as 'EpdBookServer' on Windows, run this script as Administrator (elevated shell)."
+                )
+            self.server = BlessServer(name="EpdBookServer", name_overwrite=False)
         self.server.read_request_func = self.read_request
         self.server.write_request_func = self.write_request
 
@@ -79,6 +97,18 @@ class BookServer:
             # Decode the incoming byte array
             data = value.decode("utf-8", errors="ignore")
             self.cmd_buffer += data
+            
+            # Self-healing: if a new command starts while we have old, incomplete data, discard the old data.
+            prefixes = ["REQ_LIST", "REQ_SIZE:", "REQ_TEXT:"]
+            best_idx = -1
+            for prefix in prefixes:
+                idx = self.cmd_buffer.rfind(prefix)
+                if idx > best_idx:
+                    best_idx = idx
+            if best_idx > 0:
+                logger.warning(f"Discarding incomplete command buffer: {repr(self.cmd_buffer[:best_idx])}")
+                self.cmd_buffer = self.cmd_buffer[best_idx:]
+
             if "\n" in self.cmd_buffer:
                 lines = self.cmd_buffer.split("\n")
                 # The last element might be incomplete (or empty if ended with \n)

@@ -1,5 +1,10 @@
 #include "ButtonManager.h"
 #include "Config.h"
+#include "DisplayManager.h"
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>
+
+using namespace Adafruit_LittleFS_Namespace;
 
 #define DEBOUNCE_DELAY_MS   30
 #define LONG_PRESS_DELAY_MS 800
@@ -53,18 +58,44 @@ void ButtonManager::begin() {
     bool nextWakeup = checkAndClearLatch(nextPinNum);
     bool selectWakeup = checkAndClearLatch(selectPinNum);
 
+    // Load isFlipped setting from settings file if it exists
+    bool isFlipped = false;
+    if (InternalFS.exists("/settings.dat")) {
+        File file = InternalFS.open("/settings.dat", FILE_O_READ);
+        if (file) {
+            if (file.available()) file.readStringUntil('\n'); // skip FontType
+            if (file.available()) file.readStringUntil('\n'); // skip FontSize
+            if (file.available()) {
+                String flipStr = file.readStringUntil('\n');
+                flipStr.trim();
+                if (flipStr.length() > 0) {
+                    isFlipped = (flipStr.toInt() == 1);
+                }
+            }
+            file.close();
+        }
+    }
+
     // If a button woke the board, inject a press and initialize the button's
     // state as already pressed to prevent double-clicking on release.
     if (prevWakeup) {
         Serial.println("[Button Debug] Wakeup triggered by PREV button.");
-        _prevBtn.event = BTN_CLICK;
+        if (isFlipped) {
+            _nextBtn.event = BTN_CLICK;
+        } else {
+            _prevBtn.event = BTN_CLICK;
+        }
         _prevBtn.lastPhysicalState = LOW;
         _prevBtn.debouncedState = LOW;
         _prevBtn.isLongPressed = true;
     }
     if (nextWakeup) {
         Serial.println("[Button Debug] Wakeup triggered by NEXT button.");
-        _nextBtn.event = BTN_CLICK;
+        if (isFlipped) {
+            _prevBtn.event = BTN_CLICK;
+        } else {
+            _nextBtn.event = BTN_CLICK;
+        }
         _nextBtn.lastPhysicalState = LOW;
         _nextBtn.debouncedState = LOW;
         _nextBtn.isLongPressed = true;
@@ -138,7 +169,12 @@ void ButtonManager::update() {
                 } else {
                     // Button released (active high)
                     if (!btn->isLongPressed) {
-                        btn->event = BTN_CLICK;
+                        ButtonState* targetBtn = btn;
+                        if (DisplayManager::getInstance().isFlipped()) {
+                            if (btn == &_prevBtn) targetBtn = &_nextBtn;
+                            else if (btn == &_nextBtn) targetBtn = &_prevBtn;
+                        }
+                        targetBtn->event = BTN_CLICK;
                     }
                 }
             }
@@ -146,7 +182,12 @@ void ButtonManager::update() {
             // Check for long press while button is held down
             if (btn->debouncedState == LOW && !btn->isLongPressed) {
                 if ((now - btn->pressStartTime) > LONG_PRESS_DELAY_MS) {
-                    btn->event = BTN_LONG_PRESS;
+                    ButtonState* targetBtn = btn;
+                    if (DisplayManager::getInstance().isFlipped()) {
+                        if (btn == &_prevBtn) targetBtn = &_nextBtn;
+                        else if (btn == &_nextBtn) targetBtn = &_prevBtn;
+                    }
+                    targetBtn->event = BTN_LONG_PRESS;
                     btn->isLongPressed = true;
                 }
             }

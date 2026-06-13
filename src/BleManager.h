@@ -17,6 +17,9 @@ public:
     bool isConnected() const;
     void update(); // Poll for timeout
 
+    void setPCStreamActive(bool active);
+    bool isPCStreamActive() const;
+
     void resetTransferState();
     void processCommand(const String& cmd);
 
@@ -61,6 +64,7 @@ private:
     bool _centralConnected;
     bool _isScanning;
     uint16_t _centralConnHandle;
+    bool _pcStreamActive;
 
     static BleManager* _instance;
 };

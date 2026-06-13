@@ -5,7 +5,7 @@
 #include "Config.h"
 #include <Adafruit_GFX.h>
 
-enum FontType { FONT_SANS, FONT_SERIF, FONT_MONO, FONT_LITERATA };
+enum FontType { FONT_SANS, FONT_SERIF, FONT_MONO, FONT_LITERATA, FONT_ATKINSON };
 enum FontSize { SIZE_SMALL, SIZE_MEDIUM, SIZE_LARGE };
 
 #include <Adafruit_GFX.h>
@@ -75,6 +75,8 @@ public:
     void pushHistory(uint32_t offset);
     uint32_t popHistory();
     bool hasHistory() const;
+    int getHistoryOffsets(uint32_t* dest, int maxLen);
+    void setHistoryOffsets(const uint32_t* src, int count);
 
     // Font Configuration
     FontType getFontType() const { return _fontType; }
@@ -84,10 +86,15 @@ public:
     void cycleFontType();
     void cycleFontSize();
 
+    // Orientation Configuration
+    bool isFlipped() const { return _isFlipped; }
+    void setFlipped(bool flipped);
+
     void loadSettings();
     void saveSettings();
 
     bool isWakeupFromSleep() const { return _isWakeupFromSleep; }
+    void checkAndTriggerPreFetch(const String& filename);
 
     // Make ReaderView a friend so it can call drawPageText
     friend class ReaderView;
@@ -110,8 +117,21 @@ private:
     FontType _fontType;
     FontSize _fontSize;
 
+    // Orientation settings
+    bool _isFlipped;
+
     // Sleep wakeup status
     bool _isWakeupFromSleep;
+    uint32_t _nextPageOffset;
+
+    // BLE Book text cache
+    #define BLE_CACHE_SIZE 4096
+    char _bleCacheBuffer[BLE_CACHE_SIZE];
+    uint32_t _bleCacheStartOffset;
+    uint32_t _bleCacheLength;
+    String _bleCachedFilename;
+
+    void clearBleCache();
 };
 
 #endif // DISPLAY_MANAGER_H

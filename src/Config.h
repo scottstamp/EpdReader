@@ -25,7 +25,7 @@
 // --- E-Paper Display Configuration ---
 #define EPAPER_3COLOR                                                          \
   false // Set to false to run the 3-color panel in ultra-fast B&W mode with bypassed Red RAM
-#define DISPLAY_ROTATION 1 // 1 = Landscape (296x128), 3 = Inverted Landscape
+#define DISPLAY_ROTATION 1 // 1 = Landscape (416x240), 3 = Inverted Landscape
 
 // --- Storage & Paging Engine Settings ---
 #define MAX_BOOKS 10    // Maximum books stored in flash

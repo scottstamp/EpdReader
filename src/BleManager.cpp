@@ -32,7 +32,8 @@ BleManager::BleManager() :
     _cmdBuffer(""),
     _centralConnected(false),
     _isScanning(false),
-    _centralConnHandle(BLE_CONN_HANDLE_INVALID)
+    _centralConnHandle(BLE_CONN_HANDLE_INVALID),
+    _pcStreamActive(false)
 {
     _instance = this;
 }
@@ -45,7 +46,13 @@ void BleManager::begin(BleStateCallback stateCb, BleProgressCallback progressCb)
     Bluefruit.autoConnLed(false);
 
     // Initialize Bluefruit with 1 Peripheral and 1 Central connection
-    Bluefruit.begin(1, 1);
+    bool initOk = Bluefruit.begin(1, 1);
+    if (initOk) {
+        Serial.println("[BLE Debug] Bluefruit.begin(1, 1) succeeded.");
+    } else {
+        Serial.println("[BLE Error] Bluefruit.begin(1, 1) failed!");
+    }
+
     Bluefruit.setTxPower(4); // +4 dBm (High power, good range)
     Bluefruit.setName("nRF_Epd_Reader");
 
@@ -78,15 +85,22 @@ void BleManager::begin(BleStateCallback stateCb, BleProgressCallback progressCb)
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
     Bluefruit.Advertising.addTxPower();
     Bluefruit.Advertising.addService(bleuart); // Advertise NUS uuid
-    Bluefruit.Advertising.addName();
+    
+    // Put device name in Scan Response to fit under 31-byte limit
+    Bluefruit.ScanResponse.addName();
+    
     Bluefruit.Advertising.restartOnDisconnect(true);
     Bluefruit.Advertising.setInterval(32, 244); // Fast advertising (20ms to 150.25ms)
 }
 
 void BleManager::startAdvertising() {
     if (!Bluefruit.Advertising.isRunning()) {
-        Bluefruit.Advertising.start(0); // 0 = advertise forever
-        Serial.println("BLE advertising started.");
+        bool startOk = Bluefruit.Advertising.start(0); // 0 = advertise forever
+        if (startOk) {
+            Serial.println("BLE advertising started successfully.");
+        } else {
+            Serial.println("[BLE Error] Failed to start BLE advertising!");
+        }
     }
 }
 
@@ -99,6 +113,14 @@ void BleManager::stopAdvertising() {
 
 bool BleManager::isConnected() const {
     return _connected;
+}
+
+void BleManager::setPCStreamActive(bool active) {
+    _pcStreamActive = active;
+}
+
+bool BleManager::isPCStreamActive() const {
+    return _pcStreamActive;
 }
 
 void BleManager::resetTransferState() {
@@ -191,6 +213,11 @@ void BleManager::disconnect_callback(uint16_t conn_handle, uint8_t reason) {
 void BleManager::rx_callback(uint16_t conn_handle) {
     (void) conn_handle;
     BleManager& instance = BleManager::getInstance();
+
+    // If streaming books from PC as a Peripheral, let the synchronous requests read from bleuart directly
+    if (instance._pcStreamActive) {
+        return;
+    }
 
     // Read all available bytes from BLE NUS
     while (bleuart.available()) {
@@ -436,18 +463,61 @@ bool BleManager::isCentralConnected() const {
     return _centralConnected;
 }
 
+static void sendNUSNotification(BLEUart& uart, const String& msg) {
+    int len = msg.length();
+    int offset = 0;
+    uint32_t startAttempt = millis();
+    while (offset < len && (millis() - startAttempt < 2000)) {
+        int chunk = min(20, len - offset);
+        int written = uart.write((const uint8_t*)(msg.c_str() + offset), chunk);
+        if (written > 0) {
+            offset += written;
+            startAttempt = millis(); // Reset timeout on progress
+            delay(50); // 50ms pacing delay between packets
+        } else {
+            delay(10); // Wait for BLE TX buffer to free up
+        }
+    }
+}
+
+static void sendNUSClientWrite(BLEClientUart& client, const String& msg) {
+    int len = msg.length();
+    int offset = 0;
+    uint32_t startAttempt = millis();
+    while (offset < len && (millis() - startAttempt < 2000)) {
+        int chunk = min(20, len - offset);
+        int written = client.write((const uint8_t*)(msg.c_str() + offset), chunk);
+        if (written > 0) {
+            offset += written;
+            startAttempt = millis(); // Reset timeout on progress
+            delay(50); // 50ms pacing delay
+        } else {
+            delay(10); // Wait for BLE TX buffer to free up
+        }
+    }
+}
+
 bool BleManager::requestBookList(String books[], int maxBooks, int& count) {
-    if (!_centralConnected) return false;
+    bool isCentral = _centralConnected;
+    bool isPeripheral = _connected;
+    Serial.print("[BLE Request Debug] requestBookList: isCentral=");
+    Serial.print(isCentral);
+    Serial.print(", isPeripheral=");
+    Serial.println(isPeripheral);
+    
+    if (!isCentral && !isPeripheral) return false;
     
     count = 0;
     
     // Clear RX buffer
-    while (_clientUart.available()) {
-        _clientUart.read();
+    if (isCentral) {
+        while (_clientUart.available()) _clientUart.read();
+        sendNUSClientWrite(_clientUart, "REQ_LIST\n");
+    } else {
+        while (bleuart.available()) bleuart.read();
+        sendNUSNotification(bleuart, "REQ_LIST\n");
     }
-    
-    // Send request
-    _clientUart.println("REQ_LIST");
+    Serial.println("[BLE Request Debug] Sent: REQ_LIST");
     
     // Read response with timeout
     uint32_t startTime = millis();
@@ -455,13 +525,15 @@ bool BleManager::requestBookList(String books[], int maxBooks, int& count) {
     bool listStarted = false;
     
     while (millis() - startTime < 5000) { // 5-second timeout
-        if (_clientUart.available()) {
-            char c = _clientUart.read();
+        int avail = isCentral ? _clientUart.available() : bleuart.available();
+        if (avail) {
+            char c = isCentral ? _clientUart.read() : bleuart.read();
             if (c == '\n') {
                 line.trim();
                 if (line == "LIST_START") {
                     listStarted = true;
                 } else if (line == "LIST_END") {
+                    Serial.println("[BLE Request Debug] Received LIST_END successfully.");
                     return true;
                 } else if (listStarted && line.startsWith("BOOK:")) {
                     // Parse BOOK:filename:size
@@ -480,31 +552,47 @@ bool BleManager::requestBookList(String books[], int maxBooks, int& count) {
         yield();
     }
     
+    Serial.println("[BLE Request Debug] requestBookList timed out.");
     return false; // Timeout
 }
 
 uint32_t BleManager::requestBookSize(const String& filename) {
-    if (!_centralConnected) return 0;
+    bool isCentral = _centralConnected;
+    bool isPeripheral = _connected;
+    Serial.print("[BLE Request Debug] requestBookSize: filename=");
+    Serial.print(filename);
+    Serial.print(", isCentral=");
+    Serial.print(isCentral);
+    Serial.print(", isPeripheral=");
+    Serial.println(isPeripheral);
+    
+    if (!isCentral && !isPeripheral) return 0;
     
     // Clear RX buffer
-    while (_clientUart.available()) {
-        _clientUart.read();
+    if (isCentral) {
+        while (_clientUart.available()) _clientUart.read();
+        sendNUSClientWrite(_clientUart, "REQ_SIZE:" + filename + "\n");
+    } else {
+        while (bleuart.available()) bleuart.read();
+        sendNUSNotification(bleuart, "REQ_SIZE:" + filename + "\n");
     }
-    
-    // Send request: REQ_SIZE:<filename>
-    _clientUart.println("REQ_SIZE:" + filename);
+    Serial.println("[BLE Request Debug] Sent: REQ_SIZE:" + filename);
     
     // Read response with timeout: SIZE:<bytes>
     uint32_t startTime = millis();
     String line = "";
     
     while (millis() - startTime < 3000) { // 3-second timeout
-        if (_clientUart.available()) {
-            char c = _clientUart.read();
+        int avail = isCentral ? _clientUart.available() : bleuart.available();
+        if (avail) {
+            char c = isCentral ? _clientUart.read() : bleuart.read();
             if (c == '\n') {
                 line.trim();
                 if (line.startsWith("SIZE:")) {
-                    return line.substring(5).toInt();
+                    uint32_t size = line.substring(5).toInt();
+                    Serial.print("[BLE Request Debug] Received SIZE: ");
+                    Serial.println(size);
+                    return size;
                 }
                 line = "";
             } else if (c != '\r') {
@@ -514,19 +602,36 @@ uint32_t BleManager::requestBookSize(const String& filename) {
         yield();
     }
     
+    Serial.println("[BLE Request Debug] requestBookSize timed out.");
     return 0; // Timeout
 }
 
 int BleManager::requestBookText(const String& filename, uint32_t offset, char* buffer, int maxLen) {
-    if (!_centralConnected) return 0;
+    bool isCentral = _centralConnected;
+    bool isPeripheral = _connected;
+    Serial.print("[BLE Request Debug] requestBookText: filename=");
+    Serial.print(filename);
+    Serial.print(", offset=");
+    Serial.print(offset);
+    Serial.print(", isCentral=");
+    Serial.print(isCentral);
+    Serial.print(", isPeripheral=");
+    Serial.println(isPeripheral);
+    
+    if (!isCentral && !isPeripheral) return 0;
     
     // Clear RX buffer
-    while (_clientUart.available()) {
-        _clientUart.read();
+    if (isCentral) {
+        while (_clientUart.available()) _clientUart.read();
+        sendNUSClientWrite(_clientUart, "REQ_TEXT:" + filename + ":" + String(offset) + ":" + String(maxLen) + "\n");
+    } else {
+        while (bleuart.available()) bleuart.read();
+        sendNUSNotification(bleuart, "REQ_TEXT:" + filename + ":" + String(offset) + ":" + String(maxLen) + "\n");
     }
-    
-    // Send request: REQ_TEXT:<filename>:<offset>:<length>
-    _clientUart.println("REQ_TEXT:" + filename + ":" + String(offset) + ":" + String(maxLen));
+    Serial.print("[BLE Request Debug] Sent: REQ_TEXT:");
+    Serial.print(filename);
+    Serial.print(":");
+    Serial.println(offset);
     
     // Read response header: TEXT_START:<length>
     uint32_t startTime = millis();
@@ -534,8 +639,9 @@ int BleManager::requestBookText(const String& filename, uint32_t offset, char* b
     int expectedBytes = -1;
     
     while (millis() - startTime < 5000) { // 5-second timeout
-        if (_clientUart.available()) {
-            char c = _clientUart.read();
+        int avail = isCentral ? _clientUart.available() : bleuart.available();
+        if (avail) {
+            char c = isCentral ? _clientUart.read() : bleuart.read();
             if (c == '\n') {
                 header.trim();
                 if (header.startsWith("TEXT_START:")) {
@@ -555,6 +661,9 @@ int BleManager::requestBookText(const String& filename, uint32_t offset, char* b
         return 0; // Header timeout or parse failure
     }
     
+    Serial.print("[BLE Request Debug] Received TEXT_START: ");
+    Serial.println(expectedBytes);
+    
     if (expectedBytes > maxLen) {
         expectedBytes = maxLen; // Limit to buffer size
     }
@@ -564,8 +673,9 @@ int BleManager::requestBookText(const String& filename, uint32_t offset, char* b
     startTime = millis();
     
     while (bytesRead < expectedBytes && (millis() - startTime < 5000)) {
-        if (_clientUart.available()) {
-            buffer[bytesRead++] = _clientUart.read();
+        int avail = isCentral ? _clientUart.available() : bleuart.available();
+        if (avail) {
+            buffer[bytesRead++] = isCentral ? _clientUart.read() : bleuart.read();
             startTime = millis(); // Reset timeout on byte received
         }
         yield();
@@ -576,6 +686,10 @@ int BleManager::requestBookText(const String& filename, uint32_t offset, char* b
         Serial.print(bytesRead);
         Serial.print(" of ");
         Serial.println(expectedBytes);
+    } else {
+        Serial.print("[BLE Request Debug] Successfully read ");
+        Serial.print(bytesRead);
+        Serial.println(" bytes of book text.");
     }
     
     return bytesRead;
@@ -584,12 +698,42 @@ int BleManager::requestBookText(const String& filename, uint32_t offset, char* b
 // Central callbacks
 void BleManager::scan_callback(ble_gap_evt_adv_report_t* report) {
     char name[32] = { 0 };
-    if (Bluefruit.Scanner.parseReportByType(report, BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME, (uint8_t*)name, sizeof(name)) ||
-        Bluefruit.Scanner.parseReportByType(report, BLE_GAP_AD_TYPE_SHORT_LOCAL_NAME, (uint8_t*)name, sizeof(name))) {
-        if (String(name) == "EpdBookServer") {
-            Serial.println("Found EpdBookServer! Connecting...");
-            Bluefruit.Central.connect(report);
-        }
+    
+    Bluefruit.Scanner.parseReportByType(report, BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME, (uint8_t*)name, sizeof(name));
+    if (!name[0]) {
+        Bluefruit.Scanner.parseReportByType(report, BLE_GAP_AD_TYPE_SHORT_LOCAL_NAME, (uint8_t*)name, sizeof(name));
+    }
+
+    // Print all discovered devices to serial log for debugging
+    Serial.print("[Scan Debug] Found device: '");
+    Serial.print(name[0] ? name : "[No Name]");
+    Serial.print("' RSSI: ");
+    Serial.print(report->rssi);
+    Serial.print(" MAC: ");
+    for (int i = 0; i < 6; i++) {
+        Serial.print(report->peer_addr.addr[5-i], HEX);
+        if (i < 5) Serial.print(":");
+    }
+    
+    // Print if it has our NUS UUID
+    bool hasNus = Bluefruit.Scanner.checkReportForUuid(report, BLEUuid("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
+    if (hasNus) {
+        Serial.print(" (Has NUS UUID!)");
+    }
+    Serial.println();
+
+    bool isMatch = false;
+    if (name[0] && String(name) == "EpdBookServer") {
+        isMatch = true;
+    }
+    if (!isMatch && hasNus) {
+        isMatch = true;
+    }
+    
+    if (isMatch) {
+        Serial.print("Found BLE Book Server: ");
+        Serial.println(name[0] ? name : "[NUS Service]");
+        Bluefruit.Central.connect(report);
     }
 }
 
