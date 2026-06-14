@@ -6,6 +6,9 @@
 #include "BleManager.h"
 
 using namespace Adafruit_LittleFS_Namespace;
+using LfsFile = Adafruit_LittleFS_Namespace::File;
+
+static_assert(PINS_COUNT == 36, "Custom variant not loaded! PINS_COUNT must be 36.");
 
 enum SystemState {
     STATE_BOOT,
@@ -14,7 +17,8 @@ enum SystemState {
     STATE_PC_BROWSE,
     STATE_READER,
     STATE_BLE_UPLOAD,
-    STATE_READER_MENU
+    STATE_READER_MENU,
+    STATE_SD_BROWSE
 };
 
 SystemState currentState = STATE_BOOT;
@@ -35,7 +39,7 @@ uint32_t nextPageOffset = 0;
 uint32_t activeBookSize = 0;
 
 // Menu variables
-String menuOptions[5];
+String menuOptions[6];
 int menuCount = 0;
 int selectedMenuIdx = 0;
 
@@ -50,6 +54,11 @@ int pcBookCount = 0;
 int selectedPcBookIdx = 0;
 bool resumeOnConnect = false;
 bool pcListFetched = false;
+
+// SD Browse variables
+String sdBookList[MAX_BOOKS];
+int sdBookCount = 0;
+int selectedSdBookIdx = 0;
 
 // BLE Upload Status
 String bleStatusMsg = "Waiting for connection...";
@@ -66,6 +75,7 @@ void transitionTo(SystemState newState);
 void handleMenu();
 void handleBookList();
 void handlePcBrowse();
+void handleSdBrowse();
 void handleReader();
 void handleBleUpload();
 void handleReaderMenu();
@@ -117,32 +127,61 @@ void setup() {
         Serial.println(savedOffset);
 
         // Open file to check it exists and read metadata
-        File file = StorageManager::getInstance().openBook(savedBook, "r");
-        if (file) {
-            activeBookFilename = savedBook;
-            activeBookSize = file.size();
-            
-            // Read first line as title
-            activeBookTitle = file.readStringUntil('\n');
-            activeBookTitle.trim();
-            file.close();
+        if (savedBook.startsWith("[SD]")) {
+            String realFilename = savedBook.substring(4);
+            FsFile file = StorageManager::getInstance().openSDBook(realFilename, O_RDONLY);
+            if (file) {
+                activeBookFilename = savedBook;
+                activeBookSize = file.size();
+                
+                activeBookTitle = file.readStringUntil('\n');
+                activeBookTitle.trim();
+                file.close();
 
-            currentPageOffset = savedOffset;
-            
-            // Push very first page offset to history to initialize back navigation
-            DisplayManager::getInstance().clearHistory();
-            if (histCount > 0) {
-                DisplayManager::getInstance().setHistoryOffsets(hist, histCount);
-            } else {
-                uint32_t textStart = activeBookTitle.length() + 1;
-                DisplayManager::getInstance().pushHistory(textStart);
-                if (currentPageOffset > textStart) {
-                    DisplayManager::getInstance().pushHistory(currentPageOffset);
+                currentPageOffset = savedOffset;
+                
+                DisplayManager::getInstance().clearHistory();
+                if (histCount > 0) {
+                    DisplayManager::getInstance().setHistoryOffsets(hist, histCount);
+                } else {
+                    uint32_t textStart = activeBookTitle.length() + 1;
+                    DisplayManager::getInstance().pushHistory(textStart);
+                    if (currentPageOffset > textStart) {
+                        DisplayManager::getInstance().pushHistory(currentPageOffset);
+                    }
                 }
-            }
 
-            transitionTo(STATE_READER);
-            return;
+                transitionTo(STATE_READER);
+                return;
+            }
+        } else {
+            LfsFile file = StorageManager::getInstance().openBook(savedBook, "r");
+            if (file) {
+                activeBookFilename = savedBook;
+                activeBookSize = file.size();
+                
+                // Read first line as title
+                activeBookTitle = file.readStringUntil('\n');
+                activeBookTitle.trim();
+                file.close();
+
+                currentPageOffset = savedOffset;
+                
+                // Push very first page offset to history to initialize back navigation
+                DisplayManager::getInstance().clearHistory();
+                if (histCount > 0) {
+                    DisplayManager::getInstance().setHistoryOffsets(hist, histCount);
+                } else {
+                    uint32_t textStart = activeBookTitle.length() + 1;
+                    DisplayManager::getInstance().pushHistory(textStart);
+                    if (currentPageOffset > textStart) {
+                        DisplayManager::getInstance().pushHistory(currentPageOffset);
+                    }
+                }
+
+                transitionTo(STATE_READER);
+                return;
+            }
         }
     }
 
@@ -178,6 +217,9 @@ void loop() {
             break;
         case STATE_READER_MENU:
             handleReaderMenu();
+            break;
+        case STATE_SD_BROWSE:
+            handleSdBrowse();
             break;
         default:
             break;
@@ -220,6 +262,7 @@ void transitionTo(SystemState newState) {
         }
         
         menuOptions[menuCount++] = "Book List";
+        menuOptions[menuCount++] = "SD Books";
         menuOptions[menuCount++] = "PC Books";
         menuOptions[menuCount++] = "BLE Upload Mode";
         menuOptions[menuCount++] = "Clear Storage";
@@ -360,6 +403,31 @@ void transitionTo(SystemState newState) {
         selectedReaderMenuIdx = 0;
         drawReaderMenu();
     }
+    else if (newState == STATE_SD_BROWSE) {
+        Serial.println("Transition to: STATE_SD_BROWSE");
+        selectedSdBookIdx = 0;
+        
+        MessageView msg("SD Books", "Initializing SD Card...", false);
+        DisplayManager::getInstance().draw(msg);
+
+        sdBookCount = StorageManager::getInstance().listSDBooks(sdBookList, MAX_BOOKS);
+        
+        if (sdBookCount == 0) {
+            MessageView msg("SD Books", "No books found!\nEnsure card is exFAT/FAT\nand contains .txt files\nin the root directory.", false);
+            DisplayManager::getInstance().draw(msg);
+        } else {
+            String cleanNames[MAX_BOOKS];
+            for (int i = 0; i < sdBookCount; i++) {
+                cleanNames[i] = sdBookList[i];
+                if (cleanNames[i].endsWith(".txt")) {
+                    cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+                }
+                cleanNames[i].replace("_", " ");
+            }
+            MenuView menu("Select SD Book", cleanNames, sdBookCount, selectedSdBookIdx);
+            DisplayManager::getInstance().draw(menu);
+        }
+    }
 }
 
 void handleMenu() {
@@ -394,8 +462,38 @@ void handleMenu() {
                     currentPageOffset = savedOffset;
                     resumeOnConnect = true;
                     transitionTo(STATE_PC_BROWSE);
+                } else if (savedBook.startsWith("[SD]")) {
+                    String realFilename = savedBook.substring(4);
+                    FsFile file = StorageManager::getInstance().openSDBook(realFilename, O_RDONLY);
+                    if (file) {
+                        activeBookFilename = savedBook;
+                        activeBookSize = file.size();
+                        activeBookTitle = file.readStringUntil('\n');
+                        activeBookTitle.trim();
+                        file.close();
+
+                        currentPageOffset = savedOffset;
+                        
+                        DisplayManager::getInstance().clearHistory();
+                        if (histCount > 0) {
+                            DisplayManager::getInstance().setHistoryOffsets(hist, histCount);
+                        } else {
+                            uint32_t textStart = activeBookTitle.length() + 1;
+                            DisplayManager::getInstance().pushHistory(textStart);
+                            if (currentPageOffset > textStart) {
+                                DisplayManager::getInstance().pushHistory(currentPageOffset);
+                            }
+                        }
+
+                        transitionTo(STATE_READER);
+                    } else {
+                        MessageView errMsg("Error", "Could not open SD book.", true);
+                        DisplayManager::getInstance().draw(errMsg);
+                        delay(1500);
+                        transitionTo(STATE_MENU);
+                    }
                 } else {
-                    File file = StorageManager::getInstance().openBook(savedBook, "r");
+                    LfsFile file = StorageManager::getInstance().openBook(savedBook, "r");
                     if (file) {
                         activeBookFilename = savedBook;
                         activeBookSize = file.size();
@@ -424,6 +522,9 @@ void handleMenu() {
         else if (selection == "Book List") {
             transitionTo(STATE_BOOK_LIST);
         } 
+        else if (selection == "SD Books") {
+            transitionTo(STATE_SD_BROWSE);
+        }
         else if (selection == "PC Books") {
             transitionTo(STATE_PC_BROWSE);
         }
@@ -487,7 +588,7 @@ void handleBookList() {
         
         // Open book
         activeBookFilename = bookList[selectedBookIdx];
-        File file = StorageManager::getInstance().openBook(activeBookFilename, "r");
+        LfsFile file = StorageManager::getInstance().openBook(activeBookFilename, "r");
         if (file) {
             activeBookSize = file.size();
             activeBookTitle = file.readStringUntil('\n');
@@ -1041,6 +1142,79 @@ void handlePcBrowse() {
         StorageManager::getInstance().writeProgress(activeBookFilename, textStart);
         
         transitionTo(STATE_READER);
+    }
+    else if (select == BTN_LONG_PRESS) {
+        transitionTo(STATE_MENU);
+    }
+}
+
+void handleSdBrowse() {
+    ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+    ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+
+    if (sdBookCount == 0) {
+        if (select == BTN_CLICK || select == BTN_LONG_PRESS || prev == BTN_CLICK || next == BTN_CLICK) {
+            transitionTo(STATE_MENU);
+        }
+        return;
+    }
+
+    if (prev == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedSdBookIdx = (selectedSdBookIdx - 1 + sdBookCount) % sdBookCount;
+        
+        String cleanNames[MAX_BOOKS];
+        for (int i = 0; i < sdBookCount; i++) {
+            cleanNames[i] = sdBookList[i];
+            if (cleanNames[i].endsWith(".txt")) cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+            cleanNames[i].replace("_", " ");
+        }
+        MenuView menu("Select SD Book", cleanNames, sdBookCount, selectedSdBookIdx);
+        DisplayManager::getInstance().draw(menu);
+    } 
+    else if (next == BTN_CLICK) {
+        lastActivityTime = millis();
+        selectedSdBookIdx = (selectedSdBookIdx + 1) % sdBookCount;
+
+        String cleanNames[MAX_BOOKS];
+        for (int i = 0; i < sdBookCount; i++) {
+            cleanNames[i] = sdBookList[i];
+            if (cleanNames[i].endsWith(".txt")) cleanNames[i] = cleanNames[i].substring(0, cleanNames[i].length() - 4);
+            cleanNames[i].replace("_", " ");
+        }
+        MenuView menu("Select SD Book", cleanNames, sdBookCount, selectedSdBookIdx);
+        DisplayManager::getInstance().draw(menu);
+    } 
+    else if (select == BTN_CLICK) {
+        lastActivityTime = millis();
+        
+        // Open book
+        String filename = sdBookList[selectedSdBookIdx];
+        FsFile file = StorageManager::getInstance().openSDBook(filename, O_RDONLY);
+        if (file) {
+            activeBookFilename = "[SD]" + filename;
+            activeBookSize = file.size();
+            activeBookTitle = file.readStringUntil('\n');
+            activeBookTitle.trim();
+            file.close();
+
+            currentPageOffset = 0;
+            
+            DisplayManager::getInstance().clearHistory();
+            uint32_t textStart = activeBookTitle.length() + 1;
+            DisplayManager::getInstance().pushHistory(textStart);
+
+            // Write progress
+            StorageManager::getInstance().writeProgress(activeBookFilename, textStart);
+
+            transitionTo(STATE_READER);
+        } else {
+            MessageView errMsg("Error", "Could not open SD book.", true);
+            DisplayManager::getInstance().draw(errMsg);
+            delay(1500);
+            transitionTo(STATE_SD_BROWSE);
+        }
     }
     else if (select == BTN_LONG_PRESS) {
         transitionTo(STATE_MENU);

@@ -7,10 +7,11 @@
 #define EPD_RST 29  // Maps to physical D2 (P0.17) - RST relocated here
 #define EPD_BUSY 23 // Maps to physical D7 (P0.11)
 
-// --- SPI Pins (Customized for available board pins D14/D16/D20) ---
-// We avoid Pin 15 (D15) because it connects to the built-in Blue status LED
-// on nice!nano / Supermini boards, preventing BLE-SPI hardware conflicts.
-#define EPD_MISO 24 // Unconnected dummy MISO (maps to P0.15)
+// --- SD Card Pins (SPI Shared with Display + Dedicated CS) ---
+#define SD_CS 35    // Maps to physical D8 (P1.13)
+
+// --- SPI Pins (Customized for available board pins D9/D16/D20) ---
+#define EPD_MISO 3  // Maps to physical D9 (P1.15)
 #define EPD_MOSI 2  // Maps to physical D16 (P0.10)
 #define EPD_SCK 20  // Maps to physical D20 (P0.29)
 

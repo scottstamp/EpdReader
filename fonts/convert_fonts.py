@@ -4,7 +4,6 @@ from PIL import Image, ImageDraw, ImageFont
 def convert_font(font_path, pixel_size, font_name_c):
     try:
         font1x = ImageFont.truetype(font_path, pixel_size)
-        font3x = ImageFont.truetype(font_path, pixel_size * 3)
     except Exception as e:
         print(f"Error loading font {font_path}: {e}")
         return None
@@ -49,21 +48,12 @@ def convert_font(font_path, pixel_size, font_name_c):
     chars_to_convert.append((129, '”')) # right double quote
     chars_to_convert.append((130, '’')) # right single quote / apostrophe
     chars_to_convert.append((131, '…')) # ellipsis
-    
-    try:
-        LANCZOS = Image.Resampling.LANCZOS
-    except AttributeError:
-        LANCZOS = Image.LANCZOS
-
-    # Coverage threshold to adjust stroke thickness (boldness)
-    # Lower threshold = bolder font, higher threshold = thinner font
-    THRESHOLD = 110
 
     for code, char in chars_to_convert:
-        mask3x, offset3x = font3x.getmask2(char, mode="L", anchor="ls")
-        w3x, h3x = mask3x.size
+        mask, offset = font1x.getmask2(char, mode="1", anchor="ls")
+        w, h = mask.size
         
-        if w3x == 0 or h3x == 0:
+        if w == 0 or h == 0:
             width = 0
             height = 0
             xOffset = 0
@@ -71,26 +61,19 @@ def convert_font(font_path, pixel_size, font_name_c):
             xAdvance = int(round(font1x.getlength(char)))
             pixels = []
         else:
-            # Scale down offsets and advances
-            xOffset = int(round(offset3x[0] / 3.0))
-            yOffset = int(round(offset3x[1] / 3.0))
-            xAdvance = int(round(font3x.getlength(char) / 3.0))
+            width = w
+            height = h
+            xOffset = offset[0]
+            yOffset = offset[1]
+            xAdvance = int(round(font1x.getlength(char)))
             
-            # Convert 3x mask to image and resize using Lanczos
-            img3x = Image.frombytes("L", (w3x, h3x), bytes(mask3x))
-            width = max(1, int(round(w3x / 3.0)))
-            height = max(1, int(round(h3x / 3.0)))
-            
-            img1x = img3x.resize((width, height), resample=LANCZOS)
-            
-            # Apply threshold to construct 1-bit pixels
             pixels = []
             for y in range(height):
                 for x in range(width):
-                    val = img1x.getpixel((x, y))
-                    pixels.append(255 if val > THRESHOLD else 0)
+                    val = mask.getpixel((x, y))
+                    pixels.append(1 if val > 0 else 0)
             
-            # Find actual bottom of non-zero pixels
+            # Baseline alignment correction
             last_row = -1
             for y in range(height):
                 for x in range(width):
@@ -104,12 +87,12 @@ def convert_font(font_path, pixel_size, font_name_c):
                     shift = base_bottom - pixel_bottom
                     yOffset += shift
             
-        # Pack bits
+        # Pack bits (1 bit per pixel, MSB-first)
         glyph_bytes = []
         current_byte = 0
         bit_count = 0
         for pixel in pixels:
-            current_byte = (current_byte << 1) | (1 if pixel > 0 else 0)
+            current_byte = (current_byte << 1) | pixel
             bit_count += 1
             if bit_count == 8:
                 glyph_bytes.append(current_byte)
@@ -136,7 +119,7 @@ def convert_font(font_path, pixel_size, font_name_c):
     # Format output code
     out = []
     out.append("#pragma once")
-    out.append("#include <Adafruit_GFX.h>")
+    out.append('#include <Adafruit_GFX.h>')
     out.append("")
     out.append(f"const uint8_t {font_name_c}Bitmaps[] PROGMEM = {{")
     

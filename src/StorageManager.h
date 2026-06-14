@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
+#include <SdFat.h>
 
 class StorageManager {
 public:
@@ -28,13 +29,26 @@ public:
     bool finalizeBookWrite(const String& title);
     bool clearStorage();
 
+    // SD Card support methods
+    bool beginSD();
+    int listSDBooks(String books[], int maxBooks);
+    FsFile openSDBook(const String& filename, oflag_t oflag = O_RDONLY);
+    uint8_t getSDErrorCode() { return sd.card() ? sd.card()->errorCode() : 0; }
+    uint8_t getSDErrorData() { return sd.card() ? sd.card()->errorData() : 0; }
+    void forceSDReinit() { _sdInitialized = false; }
+
 private:
     StorageManager();
     StorageManager(const StorageManager&) = delete;
     StorageManager& operator=(const StorageManager&) = delete;
 
+    void powerCyclePeripherals();
+    bool recoverSDSoftware();
+
     Adafruit_LittleFS_Namespace::File* _uploadFile;
     bool _isUploading;
+    SdFat sd;
+    bool _sdInitialized;
 };
 
 #endif // STORAGE_MANAGER_H

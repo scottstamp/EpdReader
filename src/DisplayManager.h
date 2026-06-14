@@ -5,14 +5,14 @@
 #include "Config.h"
 #include <Adafruit_GFX.h>
 
+
 enum FontType { FONT_SANS, FONT_SERIF, FONT_MONO, FONT_LITERATA, FONT_ATKINSON };
 enum FontSize { SIZE_SMALL, SIZE_MEDIUM, SIZE_LARGE };
-
-#include <Adafruit_GFX.h>
 
 class UIView {
 public:
     virtual ~UIView() {}
+    virtual void prepare() {}
     virtual void render(Adafruit_GFX& display) = 0;
     virtual bool prefersFullRefresh() { return false; }
 };
@@ -20,6 +20,7 @@ public:
 class ReaderView : public UIView {
 public:
     ReaderView(const String& filename, uint32_t startOffset, uint32_t& nextPageOffset);
+    void prepare() override;
     void render(Adafruit_GFX& display) override;
     bool prefersFullRefresh() override;
 private:
@@ -96,8 +97,13 @@ public:
     bool isWakeupFromSleep() const { return _isWakeupFromSleep; }
     void checkAndTriggerPreFetch(const String& filename);
 
+    bool getDisplayNeedsReinit() const { return _displayNeedsReinit; }
+    void setDisplayNeedsReinit(bool needs) { _displayNeedsReinit = needs; }
+
     // Make ReaderView a friend so it can call drawPageText
     friend class ReaderView;
+
+
 
 private:
     DisplayManager();
@@ -123,15 +129,18 @@ private:
     // Sleep wakeup status
     bool _isWakeupFromSleep;
     uint32_t _nextPageOffset;
+    bool _displayNeedsReinit;
 
-    // BLE Book text cache
-    #define BLE_CACHE_SIZE 4096
-    char _bleCacheBuffer[BLE_CACHE_SIZE];
-    uint32_t _bleCacheStartOffset;
-    uint32_t _bleCacheLength;
-    String _bleCachedFilename;
+    // Unified page text cache (4KB)
+    #define PAGE_CACHE_SIZE 4096
+    char _pageCacheBuffer[PAGE_CACHE_SIZE];
+    int _pageCacheLength;
+    String _pageCacheFilename;
+    uint32_t _pageCacheStartOffset;
+    uint32_t _pageCacheTrueStartOffset;
 
-    void clearBleCache();
+    void cachePageText(const String& filename, uint32_t startOffset);
+    void clearPageCache();
 };
 
 #endif // DISPLAY_MANAGER_H
