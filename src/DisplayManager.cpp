@@ -88,7 +88,7 @@ DisplayManager &DisplayManager::getInstance() {
 }
 
 DisplayManager::DisplayManager()
-    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false) {
+    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false), _currentChapterTitle(""), _currentChapterSize(0) {
   clearHistory();
 }
 
@@ -225,8 +225,15 @@ void DisplayManager::setHistoryOffsets(const uint32_t* src, int count) {
     pushHistory(src[i]);
   }
 }
-
 void DisplayManager::cachePageText(const String &filename, uint32_t startOffset) {
+  bool isChapterFile = false;
+  String cleanPath = filename;
+  if (cleanPath.startsWith("[SD]")) cleanPath = cleanPath.substring(4);
+  else if (cleanPath.startsWith("[BLE]")) cleanPath = cleanPath.substring(5);
+  if (cleanPath.indexOf('/') >= 0) {
+    isChapterFile = true;
+  }
+
   // Check if we have a cache hit.
   // The cache hits if it's the same file, the startOffset is within the cached range,
   // and we have at least 1023 bytes remaining in the cache buffer OR we have cached to the end of the file.
@@ -238,9 +245,13 @@ void DisplayManager::cachePageText(const String &filename, uint32_t startOffset)
       // If startOffset was 0, we still need to set the trueStartOffset.
       // We parse the title line from the cache buffer to find the trueStartOffset.
       if (startOffset == 0) {
-        char* newlinePtr = strchr(_pageCacheBuffer, '\n');
-        if (newlinePtr) {
-          _pageCacheTrueStartOffset = (newlinePtr - _pageCacheBuffer) + 1;
+        if (!isChapterFile) {
+          char* newlinePtr = strchr(_pageCacheBuffer, '\n');
+          if (newlinePtr) {
+            _pageCacheTrueStartOffset = (newlinePtr - _pageCacheBuffer) + 1;
+          } else {
+            _pageCacheTrueStartOffset = 0;
+          }
         } else {
           _pageCacheTrueStartOffset = 0;
         }
@@ -269,7 +280,7 @@ void DisplayManager::cachePageText(const String &filename, uint32_t startOffset)
     _pageCacheLength = bytesRead;
     _pageCacheStartOffset = fetchOffset;
     
-    if (startOffset == 0) {
+    if (startOffset == 0 && !isChapterFile) {
       char* newlinePtr = strchr(_pageCacheBuffer, '\n');
       if (newlinePtr) {
         _pageCacheTrueStartOffset = (newlinePtr - _pageCacheBuffer) + 1;
@@ -328,7 +339,7 @@ void DisplayManager::cachePageText(const String &filename, uint32_t startOffset)
       _pageCacheBuffer[_pageCacheLength] = '\0';
       file.close();
       
-      if (startOffset == 0) {
+      if (startOffset == 0 && !isChapterFile) {
         char* newlinePtr = strchr(_pageCacheBuffer, '\n');
         if (newlinePtr) {
           _pageCacheTrueStartOffset = (newlinePtr - _pageCacheBuffer) + 1;
@@ -356,7 +367,7 @@ void DisplayManager::cachePageText(const String &filename, uint32_t startOffset)
     _pageCacheBuffer[_pageCacheLength] = '\0';
     file.close();
     
-    if (startOffset == 0) {
+    if (startOffset == 0 && !isChapterFile) {
       char* newlinePtr = strchr(_pageCacheBuffer, '\n');
       if (newlinePtr) {
         _pageCacheTrueStartOffset = (newlinePtr - _pageCacheBuffer) + 1;
@@ -515,6 +526,25 @@ uint32_t DisplayManager::drawPageText(const String &filename,
     }
   }
 
+  if (performRender) {
+    // Progress bar
+    int barX = 10;
+    int barWidth = epd.width() - 20;
+    int barY = epd.height() - 5;
+    int barHeight = 3;
+
+    epd.drawRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
+
+    uint32_t currentOffset = startOffset;
+    uint32_t totalSize = _currentChapterSize > 0 ? _currentChapterSize : 1;
+    if (currentOffset > totalSize) currentOffset = totalSize;
+    
+    int progressWidth = (currentOffset * barWidth) / totalSize;
+    if (progressWidth > barWidth) progressWidth = barWidth;
+    
+    epd.fillRect(barX, barY, progressWidth, barHeight, GxEPD_BLACK);
+  }
+
   _nextPageOffset = trueStartOffset + idx;
   return _nextPageOffset;
 }
@@ -522,14 +552,17 @@ uint32_t DisplayManager::drawPageText(const String &filename,
 // ==================== UIView Implementations ====================
 
 // ReaderView
-ReaderView::ReaderView(const String& filename, uint32_t startOffset, uint32_t& nextPageOffset)
-    : _filename(filename), _startOffset(startOffset), _nextPageOffset(nextPageOffset) {}
+ReaderView::ReaderView(const String& filename, uint32_t startOffset, uint32_t& nextPageOffset,
+                       bool isChapterized, const String& chapterTitle, uint32_t chapterSize)
+    : _filename(filename), _startOffset(startOffset), _nextPageOffset(nextPageOffset),
+      _isChapterized(isChapterized), _chapterTitle(chapterTitle), _chapterSize(chapterSize) {}
 
 void ReaderView::prepare() {
   DisplayManager::getInstance().cachePageText(_filename, _startOffset);
 }
 
 void ReaderView::render(Adafruit_GFX& display) {
+  DisplayManager::getInstance().setChapterInfo(_chapterTitle, _chapterSize);
   _nextPageOffset = DisplayManager::getInstance().drawPageText(_filename, _startOffset, true);
 }
 

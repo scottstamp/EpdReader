@@ -72,7 +72,9 @@ const uint32_t g_ADigitalPinMap[] =
    9,  // D33 is P0.09 (NFC1, exposed only via test point on bottom of board)
 
   32+14, // D34 is P1.14
-  32+13  // D35 is P1.13 (nice!nano physical pin D8 on v2)
+  32+13, // D35 is P1.13 (nice!nano physical pin D8 on v2)
+  32+0,  // D36 is P1.00 (nice!nano physical pin D6)
+  32+11  // D37 is P1.11 (nice!nano physical pin)
 };
 
 void initVariant()

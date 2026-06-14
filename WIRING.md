@@ -63,13 +63,12 @@ The nice!nano firmware supports two methods of battery cell voltage measurement:
 
 ---
 
-## 5. Micro SD Card Slot Wiring (Shared SPI Bus)
+## 5. Micro SD Card Slot Wiring (Dedicated SPI2 Bus)
 
-To support reading from an exFAT formatted micro SD card, the SD card slot shares the hardware SPI interface with the e-Paper display, utilizing separate Chip Select (CS) pins to prevent bus conflicts. 
+To support reading from an exFAT formatted micro SD card with maximum reliability and speed, the SD card slot is connected to a dedicated second hardware SPI peripheral (`SPI2` / `SPIM2` on the nRF52840). This isolates the SD card traffic from the e-Paper display's SPI bus, completely eliminating signal noise, clock-edge conflicts, and desyncs.
 
-*   **SPI Bus Sharing**: MOSI (SDA / DIN) and SCK (SCL / CLK) lines are wired in parallel to both the display and the SD card slot.
-*   **MISO Line**: The SD card slot DO (MISO) line must be connected to the nice!nano hardware MISO pin (Pin 24 / silkscreen MISO) so the MCU can read block data. (The display is write-only and does not connect to MISO).
-*   **SD CS Pin**: A dedicated digital pin **35** (silkscreen **D8**) is allocated for the SD card's Chip Select.
+*   **SPI Bus Isolation**: The e-Paper display runs on `SPI` (pins 3, 2, 20), while the SD card runs on a separate hardware bus `SPI2` (pins 3, 36, 37).
+*   **SD CS Pin**: Stays on digital pin **35** (silkscreen **D8**).
 
 ### Pinout Mapping for SD Card Slot
 
@@ -78,20 +77,27 @@ To support reading from an exFAT formatted micro SD card, the SD card slot share
 | **GND** | GND | — | **GND** | Power Ground |
 | **VCC** | VCC | — | **VCC / 3V3** | 3.3V Power Supply (Can be connected to display's switched VCC or directly to nice!nano 3.3V) |
 | **MISO / DO** | `3` | `P1.15` | **D9** | SPI Master In Slave Out (Data from SD card) |
-| **MOSI / DI / SDA** | `2` | `P0.10` | **D16** | SPI Master Out Slave In (Data to SD card) - *Shared with Display DIN* |
-| **SCK / CLK / SCL** | `20` | `P0.29` | **D20** | SPI Clock line - *Shared with Display CLK* |
+| **MOSI / DI / SDA** | `36` | `P1.00` | **D6** | SPI Master Out Slave In (Data to SD card) |
+| **SCK / CLK / SCL** | `37` | `P1.11` | — | SPI Clock line |
 | **CS** | `35` | `P1.13` | **D8** | Dedicated SD Chip Select (Active Low) |
 
-### Complete Shared SPI Topology Diagram
+### Complete Isolated SPI Topology Diagram
 
 ```mermaid
 graph TD
     subgraph nice!nano MCU
-        MISO["MISO - Pin 3 (P1.15)"]
-        MOSI["MOSI/D16 - Pin 2 (P0.10)"]
-        SCK["SCK/D20 - Pin 20 (P0.29)"]
-        EPD_CS["EPD_CS/D10 - Pin 33 (P0.09)"]
-        SD_CS["SD_CS/D8 - Pin 35 (P1.13)"]
+        subgraph Dedicated SPI1 for Display
+            EPD_MISO["MISO - Pin 3 (P1.15)"]
+            EPD_MOSI["MOSI - Pin 2 (P0.10)"]
+            EPD_SCK["SCK - Pin 20 (P0.29)"]
+            EPD_CS["EPD_CS - Pin 33 (P0.09)"]
+        end
+        subgraph Dedicated SPI2 for SD Card
+            SD_MISO["SD_MISO - Pin 3 (P1.15)"]
+            SD_MOSI["SD_MOSI - Pin 36 (P1.00)"]
+            SD_SCK["SD_SCK - Pin 37 (P1.11)"]
+            SD_CS["SD_CS - Pin 35 (P1.13)"]
+        end
     end
 
     subgraph SD Card Slot
@@ -107,11 +113,13 @@ graph TD
         EPD_CS_pin["CS"]
     end
 
-    MISO --> SD_DO
-    MOSI --> SD_DI
-    MOSI --> EPD_DIN
-    SCK --> SD_CLK
-    SCK --> EPD_CLK
+    EPD_MISO -.->|Not connected| EPD_CS_pin
+    EPD_MOSI --> EPD_DIN
+    EPD_SCK --> EPD_CLK
     EPD_CS --> EPD_CS_pin
+
+    SD_MISO --> SD_DO
+    SD_MOSI --> SD_DI
+    SD_SCK --> SD_CLK
     SD_CS --> SD_CS_pin
 ```

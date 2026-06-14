@@ -19,7 +19,8 @@ public:
 
 class ReaderView : public UIView {
 public:
-    ReaderView(const String& filename, uint32_t startOffset, uint32_t& nextPageOffset);
+    ReaderView(const String& filename, uint32_t startOffset, uint32_t& nextPageOffset,
+               bool isChapterized = false, const String& chapterTitle = "", uint32_t chapterSize = 0);
     void prepare() override;
     void render(Adafruit_GFX& display) override;
     bool prefersFullRefresh() override;
@@ -27,6 +28,9 @@ private:
     String _filename;
     uint32_t _startOffset;
     uint32_t& _nextPageOffset;
+    bool _isChapterized;
+    String _chapterTitle;
+    uint32_t _chapterSize;
 };
 
 class MenuView : public UIView {
@@ -100,6 +104,11 @@ public:
     bool getDisplayNeedsReinit() const { return _displayNeedsReinit; }
     void setDisplayNeedsReinit(bool needs) { _displayNeedsReinit = needs; }
 
+    void setChapterInfo(const String& title, uint32_t size) {
+        _currentChapterTitle = title;
+        _currentChapterSize = size;
+    }
+
     // Make ReaderView a friend so it can call drawPageText
     friend class ReaderView;
 
@@ -130,6 +139,10 @@ private:
     bool _isWakeupFromSleep;
     uint32_t _nextPageOffset;
     bool _displayNeedsReinit;
+
+    // Chapter metadata for rendering
+    String _currentChapterTitle;
+    uint32_t _currentChapterSize;
 
     // Unified page text cache (4KB)
     #define PAGE_CACHE_SIZE 4096

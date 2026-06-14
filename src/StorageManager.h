@@ -37,6 +37,12 @@ public:
     uint8_t getSDErrorData() { return sd.card() ? sd.card()->errorData() : 0; }
     void forceSDReinit() { _sdInitialized = false; }
 
+    // USB Mass Storage support
+    bool enableUSBMSC(bool enable);
+    bool sdCardReadSectors(uint32_t lba, void* buffer, uint32_t bufsize);
+    bool sdCardWriteSectors(uint32_t lba, const uint8_t* buffer, uint32_t bufsize);
+    uint32_t sdCardSectorCount();
+
 private:
     StorageManager();
     StorageManager(const StorageManager&) = delete;

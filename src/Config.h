@@ -7,10 +7,13 @@
 #define EPD_RST 29  // Maps to physical D2 (P0.17) - RST relocated here
 #define EPD_BUSY 23 // Maps to physical D7 (P0.11)
 
-// --- SD Card Pins (SPI Shared with Display + Dedicated CS) ---
+// --- Dedicated SD Card Pins (SPI2 / SPIM2) ---
 #define SD_CS 35    // Maps to physical D8 (P1.13)
+#define SD_MISO 3   // Maps to physical D9 (P1.15)
+#define SD_MOSI 36  // Maps to physical D6 (P1.00)
+#define SD_SCK 37   // Maps to physical P1.11
 
-// --- SPI Pins (Customized for available board pins D9/D16/D20) ---
+// --- E-Paper Display SPI Pins (SPI1 / SPIM1) ---
 #define EPD_MISO 3  // Maps to physical D9 (P1.15)
 #define EPD_MOSI 2  // Maps to physical D16 (P0.10)
 #define EPD_SCK 20  // Maps to physical D20 (P0.29)
@@ -30,6 +33,7 @@
 
 // --- Storage & Paging Engine Settings ---
 #define MAX_BOOKS 10    // Maximum books stored in flash
+#define MAX_CHAPTERS 100 // Maximum chapters in a book
 #define HISTORY_SIZE 64 // Size of circular page offset cache (saves RAM)
 #define BOOK_DIR "/books"
 #define PROGRESS_FILE "/progress.dat"

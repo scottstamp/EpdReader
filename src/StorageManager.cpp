@@ -3,6 +3,28 @@
 
 #include "DisplayManager.h"
 #include "ButtonManager.h"
+#include <SPI.h>
+#include <Adafruit_TinyUSB.h>
+
+// Instantiate dedicated hardware SPI port for the SD Card
+SPIClass SPI2(NRF_SPIM2, SD_MISO, SD_SCK, SD_MOSI);
+
+Adafruit_USBD_MSC usb_msc;
+
+// Callbacks for MSC
+int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
+    bool ok = StorageManager::getInstance().sdCardReadSectors(lba, buffer, bufsize);
+    return ok ? (int32_t)bufsize : -1;
+}
+
+int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
+    bool ok = StorageManager::getInstance().sdCardWriteSectors(lba, buffer, bufsize);
+    return ok ? (int32_t)bufsize : -1;
+}
+
+void msc_flush_cb(void) {
+    // No-op
+}
 
 using namespace Adafruit_LittleFS_Namespace;
 using LfsFile = Adafruit_LittleFS_Namespace::File;
@@ -15,6 +37,12 @@ StorageManager& StorageManager::getInstance() {
 StorageManager::StorageManager() : _uploadFile(nullptr), _isUploading(false), _sdInitialized(false) {}
 
 bool StorageManager::begin() {
+    // Initialize USB Mass Storage interface
+    usb_msc.setID("nice!nano", "SD Reader", "1.0");
+    usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb);
+    usb_msc.setUnitReady(false); // Media is not present/ready initially
+    usb_msc.begin();
+
     // Start InternalFS (LittleFS)
     if (!InternalFS.begin()) {
         // If mounting fails, format
@@ -221,8 +249,21 @@ bool StorageManager::readProgress(String& currentBook, uint32_t& offset, uint32_
     return true;
 }
 
+static String getBookmarkFilename(const String& filename) {
+    String cleanName = filename;
+    if (cleanName.startsWith("[SD]")) cleanName = cleanName.substring(4);
+    else if (cleanName.startsWith("[BLE]")) cleanName = cleanName.substring(5);
+    
+    int slashIdx = cleanName.indexOf('/');
+    if (slashIdx > 0) {
+        cleanName = cleanName.substring(0, slashIdx);
+    }
+    cleanName.replace("/", "_");
+    return cleanName;
+}
+
 bool StorageManager::writeBookmark(const String& filename, uint32_t offset) {
-    String path = String(BOOK_DIR) + "/" + filename + ".bmk";
+    String path = String(BOOK_DIR) + "/" + getBookmarkFilename(filename) + ".bmk";
     if (InternalFS.exists(path.c_str())) {
         InternalFS.remove(path.c_str());
     }
@@ -247,7 +288,7 @@ bool StorageManager::writeBookmark(const String& filename, uint32_t offset) {
 }
 
 bool StorageManager::readBookmark(const String& filename, uint32_t& offset) {
-    String path = String(BOOK_DIR) + "/" + filename + ".bmk";
+    String path = String(BOOK_DIR) + "/" + getBookmarkFilename(filename) + ".bmk";
     if (!InternalFS.exists(path.c_str())) {
         offset = 0;
         return false;
@@ -264,7 +305,7 @@ bool StorageManager::readBookmark(const String& filename, uint32_t& offset) {
 }
 
 bool StorageManager::readBookmark(const String& filename, uint32_t& offset, uint32_t* historyDest, int maxHistoryLen, int& historyCount) {
-    String path = String(BOOK_DIR) + "/" + filename + ".bmk";
+    String path = String(BOOK_DIR) + "/" + getBookmarkFilename(filename) + ".bmk";
     if (!InternalFS.exists(path.c_str())) {
         offset = 0;
         historyCount = 0;
@@ -458,36 +499,29 @@ bool StorageManager::clearStorage() {
 }
 
 bool StorageManager::recoverSDSoftware() {
-    Serial.println("[SD Debug] Attempting software-only SPI recovery with active bus clock flushing...");
+    Serial.println("[SD Debug] Attempting software-only SPI recovery on dedicated SPI2...");
 
-    // 1. Ensure display CS is deasserted (HIGH)
-    pinMode(EPD_CS, OUTPUT);
-    digitalWrite(EPD_CS, HIGH);
-
-    // 2. Drive SD CS LOW (asserted) so the card processes clocks to flush any pending read/write
+    // 1. Ensure SD CS is LOW (asserted) so the card processes clocks to flush any pending read/write
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, LOW);
 
-    // 3. Always restore custom SPI pins and ensure SPI is enabled
-    SPI.setPins(EPD_MISO, EPD_SCK, EPD_MOSI);
-    SPI.begin();
+    // 2. Ensure SPI2 is enabled
+    SPI2.begin();
 
-    // 4. Enable internal pull-up on MISO pin to prevent floating
-    pinMode(EPD_MISO, INPUT_PULLUP);
+    // 3. Enable internal pull-up on SD_MISO pin to prevent floating
+    pinMode(SD_MISO, INPUT_PULLUP);
 
-    // 5. Send up to 600 bytes of 0xFF with CS LOW.
-    // This allows the SD card to finish outputting any pending data block (512 bytes + 2 CRC)
-    // or finish busy-writing.
-    SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+    // 4. Send up to 600 bytes of 0xFF with CS LOW on SPI2.
+    SPI2.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
     bool misoReleased = false;
     for (int i = 0; i < 600; i++) {
-        uint8_t res = SPI.transfer(0xFF);
+        uint8_t res = SPI2.transfer(0xFF);
         // If MISO is 0xFF, it means the card has released the bus (MISO is HIGH).
         if (res == 0xFF) {
             // Verify MISO remains HIGH for a few more transfers to ensure stable release
             misoReleased = true;
             for (int j = 0; j < 5; j++) {
-                if (SPI.transfer(0xFF) != 0xFF) {
+                if (SPI2.transfer(0xFF) != 0xFF) {
                     misoReleased = false;
                     break;
                 }
@@ -495,60 +529,72 @@ bool StorageManager::recoverSDSoftware() {
             if (misoReleased) {
                 Serial.print("[SD Debug] Software recovery: MISO released after ");
                 Serial.print(i);
-                Serial.println(" bytes of active clocking.");
+                Serial.println(" bytes of active clocking on SPI2.");
                 break;
             }
         }
     }
-    SPI.endTransaction();
+    SPI2.endTransaction();
 
-    // 6. Deassert SD CS (HIGH)
+    // 5. Deassert SD CS (HIGH)
     digitalWrite(SD_CS, HIGH);
 
-    // 7. Send 80 clocks (10 bytes of 0xFF) with CS HIGH to reset the card's SPI receiver state machine
-    SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+    // 6. Send 80 clocks (10 bytes of 0xFF) with CS HIGH to reset the card's SPI receiver state machine
+    SPI2.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
     for (int i = 0; i < 10; i++) {
-        SPI.transfer(0xFF);
+        SPI2.transfer(0xFF);
     }
-    SPI.endTransaction();
+    SPI2.endTransaction();
 
-    // 8. Wait 5ms for card's internal controller to stabilize
+    // 7. Wait 5ms for card's internal controller to stabilize
     delay(5);
 
-    // 9. Verify MISO is released (HIGH due to pull-up)
-    if (digitalRead(EPD_MISO) == LOW) {
-        Serial.println("[SD Debug] Software recovery failed: MISO is still held LOW after flushing!");
+    // 8. Verify MISO is released (HIGH due to pull-up)
+    if (digitalRead(SD_MISO) == LOW) {
+        Serial.println("[SD Debug] Software recovery failed: MISO is still held LOW after flushing on SPI2!");
         return false;
     }
 
     Serial.println("[SD Debug] Software recovery: MISO is HIGH. Re-initializing card...");
 
-    // 10. Attempt to begin SdFat at 1 MHz first for stability
-    if (sd.begin(SdSpiConfig(SD_CS, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(1)))) {
+    // 9. Attempt to begin SdFat at 4 MHz on dedicated SPI2
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(4), &SPI2))) {
         _sdInitialized = true;
-        Serial.println("[SD Debug] SD Card re-initialized successfully via software recovery at 1 MHz.");
+        Serial.println("[SD Debug] SD Card re-initialized successfully via software recovery at 4 MHz on dedicated SPI2.");
         return true;
     }
 
-    // 11. Attempt at 2 MHz
-    if (sd.begin(SdSpiConfig(SD_CS, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(2)))) {
+    // 10. Attempt at 2 MHz
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(2), &SPI2))) {
         _sdInitialized = true;
-        Serial.println("[SD Debug] SD Card re-initialized successfully via software recovery at 2 MHz.");
+        Serial.println("[SD Debug] SD Card re-initialized successfully via software recovery at 2 MHz on dedicated SPI2.");
         return true;
     }
 
-    Serial.println("[SD Debug] Software recovery failed to re-initialize card.");
+    // 11. Attempt at 1 MHz
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(1), &SPI2))) {
+        _sdInitialized = true;
+        Serial.println("[SD Debug] SD Card re-initialized successfully via software recovery at 1 MHz on dedicated SPI2.");
+        return true;
+    }
+
+    Serial.println("[SD Debug] Software recovery failed to re-initialize card on dedicated SPI2.");
     return false;
 }
 
 void StorageManager::powerCyclePeripherals() {
     Serial.println("[SD Debug] Power-cycling peripherals (safely isolating pins to prevent latch-up)...");
 
-    // 1. End SPI to release control of SPI pins
+    // 1. End SPI interfaces to release control of SPI pins
     SPI.end();
+    SPI2.end();
 
     // 2. Set all peripheral pins to INPUT (tristate) so they do not parasitically power the chips
     pinMode(SD_CS, INPUT);
+    pinMode(SD_SCK, INPUT);
+    pinMode(SD_MOSI, INPUT);
+    pinMode(SD_MISO, INPUT);
+    
     pinMode(EPD_CS, INPUT);
     pinMode(EPD_DC, INPUT);
     pinMode(EPD_RST, INPUT);
@@ -583,12 +629,19 @@ void StorageManager::powerCyclePeripherals() {
     pinMode(EPD_RST, OUTPUT);
     digitalWrite(EPD_RST, HIGH);
 
-    // Drive clock and data lines LOW (idle state)
+    // Drive display clock and data lines LOW (idle state)
     pinMode(EPD_MOSI, OUTPUT);
     digitalWrite(EPD_MOSI, LOW);
     
     pinMode(EPD_SCK, OUTPUT);
     digitalWrite(EPD_SCK, LOW);
+
+    // Drive SD clock and data lines LOW (idle state)
+    pinMode(SD_MOSI, OUTPUT);
+    digitalWrite(SD_MOSI, LOW);
+    
+    pinMode(SD_SCK, OUTPUT);
+    digitalWrite(SD_SCK, LOW);
 
     // EPD_BUSY remains INPUT
     pinMode(EPD_BUSY, INPUT);
@@ -596,15 +649,21 @@ void StorageManager::powerCyclePeripherals() {
     // 8. Restore SPI and pin assignments
     SPI.setPins(EPD_MISO, EPD_SCK, EPD_MOSI);
     SPI.begin();
-
-    // Enable internal pull-up on MISO
     pinMode(EPD_MISO, INPUT_PULLUP);
 
-    // 9. Send 16 dummy clock cycles with CS lines HIGH to clear SPI bus
+    SPI2.begin();
+    pinMode(SD_MISO, INPUT_PULLUP);
+
+    // 9. Send 16 dummy clock cycles with CS lines HIGH to clear SPI buses
     SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
     SPI.transfer(0xFF);
     SPI.transfer(0xFF);
     SPI.endTransaction();
+
+    SPI2.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+    SPI2.transfer(0xFF);
+    SPI2.transfer(0xFF);
+    SPI2.endTransaction();
 
     // 10. Mark display as needing reinit since it lost power
     DisplayManager::getInstance().setDisplayNeedsReinit(true);
@@ -619,20 +678,16 @@ bool StorageManager::beginSD() {
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
 
-    // Always restore custom SPI pins and ensure SPI is enabled
-    // because GxEPD2 display driver operations might disable SPI or change pin states.
-    SPI.setPins(EPD_MISO, EPD_SCK, EPD_MOSI);
-    SPI.begin();
+    // Initialize SPI2 interface
+    SPI2.begin();
+    pinMode(SD_MISO, INPUT_PULLUP);
 
-    // Enable internal pull-up on MISO pin to prevent floating
-    pinMode(EPD_MISO, INPUT_PULLUP);
-
-    // Send 16 dummy clock cycles (2 bytes of 0xFF) with both CS pins HIGH
-    // to force the SD card (and e-paper display) to release the MISO line.
-    SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(0xFF);
-    SPI.transfer(0xFF);
-    SPI.endTransaction();
+    // Send 16 dummy clock cycles (2 bytes of 0xFF) with SD CS HIGH
+    // on SPI2 to force the SD card to release MISO and enter stable state.
+    SPI2.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+    SPI2.transfer(0xFF);
+    SPI2.transfer(0xFF);
+    SPI2.endTransaction();
 
     if (_sdInitialized) {
         // Verify the card is still inserted, initialized, and responsive to commands.
@@ -642,7 +697,7 @@ bool StorageManager::beginSD() {
             return true;
         }
 
-        // If the card was working and now fails, it has crashed/desynced due to display SPI activity.
+        // If the card was working and now fails, it has crashed/desynced.
         Serial.println("[SD Debug] Card desync detected! Attempting software recovery...");
         if (recoverSDSoftware()) {
             return true;
@@ -656,18 +711,25 @@ bool StorageManager::beginSD() {
     
     Serial.println("[SD Debug] Initializing SD Card...");
 
-    // Initialize SdFat using SdSpiConfig at 2 MHz clock speed.
-    // By passing USER_SPI_BEGIN, we prevent SdFat from calling SPI.begin() internally,
-    // which would reset the SPI pins to the board's default pins.
-    if (sd.begin(SdSpiConfig(SD_CS, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(2)))) {
+    // Initialize SdFat using SdSpiConfig at 4 MHz clock speed.
+    // By passing USER_SPI_BEGIN, we prevent SdFat from calling SPI.begin() internally.
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(4), &SPI2))) {
         _sdInitialized = true;
-        Serial.println("[SD Debug] SD Card initialized successfully at 2 MHz.");
+        Serial.println("[SD Debug] SD Card initialized successfully at 4 MHz.");
         return true;
     }
     
-    // Fallback: try even lower speed (1 MHz) just in case
+    // Fallback: try lower speed (2 MHz)
+    Serial.println("[SD Debug] 4 MHz failed, retrying at 2 MHz...");
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(2), &SPI2))) {
+        _sdInitialized = true;
+        Serial.println("[SD Debug] SD Card initialized at 2 MHz.");
+        return true;
+    }
+
+    // Fallback: try lowest speed (1 MHz)
     Serial.println("[SD Debug] 2 MHz failed, retrying at 1 MHz...");
-    if (sd.begin(SdSpiConfig(SD_CS, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(1)))) {
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(1), &SPI2))) {
         _sdInitialized = true;
         Serial.println("[SD Debug] SD Card initialized at 1 MHz.");
         return true;
@@ -687,13 +749,19 @@ bool StorageManager::beginSD() {
 
     // Try to initialize again after power cycle
     Serial.println("[SD Debug] Retrying SD Card initialization after power cycle...");
-    if (sd.begin(SdSpiConfig(SD_CS, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(2)))) {
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(4), &SPI2))) {
         _sdInitialized = true;
-        Serial.println("[SD Debug] SD Card recovered successfully at 2 MHz after power cycle.");
+        Serial.println("[SD Debug] SD Card recovered successfully at 4 MHz after power cycle.");
         return true;
     }
 
-    if (sd.begin(SdSpiConfig(SD_CS, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(1)))) {
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(2), &SPI2))) {
+        _sdInitialized = true;
+        Serial.println("[SD Debug] SD Card recovered at 2 MHz after power cycle.");
+        return true;
+    }
+
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(1), &SPI2))) {
         _sdInitialized = true;
         Serial.println("[SD Debug] SD Card recovered at 1 MHz after power cycle.");
         return true;
@@ -719,7 +787,17 @@ int StorageManager::listSDBooks(String books[], int maxBooks) {
         file.getName(name, sizeof(name));
         String filename = String(name);
         
-        if (!file.isDir() && filename.endsWith(".txt") && !filename.startsWith(".")) {
+        if (filename.startsWith(".")) {
+            file.close();
+            continue;
+        }
+        
+        if (file.isDir()) {
+            String indexPath = filename + "/index.txt";
+            if (sd.exists(indexPath.c_str())) {
+                books[count++] = filename + "/";
+            }
+        } else if (filename.endsWith(".txt")) {
             books[count++] = filename;
         }
         file.close();
@@ -733,4 +811,39 @@ FsFile StorageManager::openSDBook(const String& filename, oflag_t oflag) {
         return FsFile();
     }
     return sd.open(filename.c_str(), oflag);
+}
+
+bool StorageManager::enableUSBMSC(bool enable) {
+    if (enable) {
+        if (!_sdInitialized && !beginSD()) {
+            Serial.println("[MSC Debug] Failed to initialize SD card for USB MSC.");
+            return false;
+        }
+        uint32_t sectors = sd.card()->sectorCount();
+        usb_msc.setCapacity(sectors, 512);
+        usb_msc.setUnitReady(true);
+        Serial.println("[MSC Debug] USB MSC enabled. SD card exposed.");
+        return true;
+    } else {
+        usb_msc.setUnitReady(false);
+        // Force reinitialization of SD next time it's accessed by MCU
+        _sdInitialized = false;
+        Serial.println("[MSC Debug] USB MSC disabled. SD card unmounted.");
+        return true;
+    }
+}
+
+bool StorageManager::sdCardReadSectors(uint32_t lba, void* buffer, uint32_t bufsize) {
+    if (!_sdInitialized && !beginSD()) return false;
+    return sd.card()->readSectors(lba, (uint8_t*)buffer, bufsize / 512);
+}
+
+bool StorageManager::sdCardWriteSectors(uint32_t lba, const uint8_t* buffer, uint32_t bufsize) {
+    if (!_sdInitialized && !beginSD()) return false;
+    return sd.card()->writeSectors(lba, buffer, bufsize / 512);
+}
+
+uint32_t StorageManager::sdCardSectorCount() {
+    if (!_sdInitialized && !beginSD()) return 0;
+    return sd.card()->sectorCount();
 }
