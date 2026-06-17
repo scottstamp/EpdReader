@@ -89,6 +89,120 @@ def convert_epub(epub_path, output_dir):
         try:
             opf_data = z.read(opf_path)
             opf_root = ET.fromstring(opf_data)
+            
+            # Find and extract cover image
+            cover_path = None
+            try:
+                manifest_el = None
+                metadata_el = None
+                for el in opf_root.iter():
+                    tag = el.tag.split('}')[-1]
+                    if tag == 'manifest':
+                        manifest_el = el
+                    elif tag == 'metadata':
+                        metadata_el = el
+
+                # Attempt 1: properties="cover-image"
+                if manifest_el is not None:
+                    for item in manifest_el:
+                        tag = item.tag.split('}')[-1]
+                        if tag == 'item':
+                            props = item.attrib.get('properties', '')
+                            if 'cover-image' in props.split():
+                                cover_path = item.attrib.get('href')
+                                break
+
+                # Attempt 2: meta name="cover"
+                if not cover_path and metadata_el is not None:
+                    cover_id = None
+                    for meta in metadata_el:
+                        tag = meta.tag.split('}')[-1]
+                        if tag == 'meta' and meta.attrib.get('name') == 'cover':
+                            cover_id = meta.attrib.get('content')
+                            break
+                    if cover_id and manifest_el is not None:
+                        for item in manifest_el:
+                            tag = item.tag.split('}')[-1]
+                            if tag == 'item' and item.attrib.get('id') == cover_id:
+                                cover_path = item.attrib.get('href')
+                                break
+
+                # Attempt 3: ID or href containing "cover"
+                if not cover_path and manifest_el is not None:
+                    for item in manifest_el:
+                        tag = item.tag.split('}')[-1]
+                        if tag == 'item':
+                            item_id = item.attrib.get('id', '').lower()
+                            href = item.attrib.get('href', '').lower()
+                            media_type = item.attrib.get('media-type', '').lower()
+                            if ('cover' in item_id or 'cover' in href) and media_type.startswith('image/'):
+                                cover_path = item.attrib.get('href')
+                                break
+
+                # Attempt 4: first image in manifest
+                if not cover_path and manifest_el is not None:
+                    for item in manifest_el:
+                        tag = item.tag.split('}')[-1]
+                        if tag == 'item':
+                            media_type = item.attrib.get('media-type', '').lower()
+                            if media_type.startswith('image/'):
+                                cover_path = item.attrib.get('href')
+                                break
+
+                if cover_path:
+                    cover_zip_path = resolve_zip_path(opf_path, cover_path)
+                    print(f"Extracting cover image from: {cover_zip_path}")
+                    cover_data = z.read(cover_zip_path)
+                    
+                    # Process cover image to 2-bit 160x240 dithered grayscale bitmap
+                    from PIL import Image
+                    import io
+                    
+                    img = Image.open(io.BytesIO(cover_data))
+                    target_w, target_h = 160, 240
+                    
+                     # Resize keeping aspect ratio
+                    img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+                    
+                    # Convert to 4-level grayscale palette with Floyd-Steinberg dithering
+                    # Palette values: 0 (black), 85 (dark gray), 170 (light gray), 255 (white)
+                    palette = [0,0,0,  85,85,85,  170,170,170,  255,255,255] + [255,255,255]*252
+                    palette_img = Image.new('P', (1, 1))
+                    palette_img.putpalette(palette)
+                    
+                    img_rgb = img.convert('RGB')
+                    img_quant = img_rgb.quantize(palette=palette_img, dither=Image.Dither.FLOYDSTEINBERG)
+                    
+                    # Create a white canvas (index 3 represents white in our palette)
+                    canvas = Image.new('P', (target_w, target_h), 3)
+                    canvas.putpalette(palette)
+                    
+                    # Center-paste
+                    offset_x = (target_w - img_quant.width) // 2
+                    offset_y = (target_h - img_quant.height) // 2
+                    canvas.paste(img_quant, (offset_x, offset_y))
+                    
+                    # Pack 2-bit pixels (4 pixels per byte) MSB-first
+                    pixels = list(canvas.getdata())
+                    packed_bytes = bytearray()
+                    for i in range(0, len(pixels), 4):
+                        p0 = pixels[i]
+                        p1 = pixels[i+1] if i+1 < len(pixels) else 3
+                        p2 = pixels[i+2] if i+2 < len(pixels) else 3
+                        p3 = pixels[i+3] if i+3 < len(pixels) else 3
+                        
+                        b = (p0 << 6) | (p1 << 4) | (p2 << 2) | p3
+                        packed_bytes.append(b)
+                    
+                    output_cover_path = os.path.join(output_dir, 'cover.mono')
+                    with open(output_cover_path, 'wb') as f:
+                        f.write(packed_bytes)
+                    print(f"Successfully wrote 2-bit dithered cover to: {output_cover_path}")
+                else:
+                    print("Warning: No cover image found in EPUB manifest/metadata.")
+            except Exception as e:
+                print(f"Warning: Failed to extract/process cover image: {e}")
+
             # Find manifest items with properties="nav"
             nav_href = None
             manifest = opf_root.find('.//{http://www.idpf.org/2007/opf}manifest')

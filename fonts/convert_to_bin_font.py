@@ -1,19 +1,43 @@
+import struct
+import sys
 import os
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageFont
 
-def convert_font(font_path, pixel_size, font_name_c):
+# .venv310/Scripts/python.exe fonts/convert_to_bin_font.py <your_font.ttf> <size_px> <output_name.font>
+
+# Binary file structure:
+# Header:
+# char magic[4] = "GFT1"
+# uint16_t first = 32
+# uint16_t last = 131
+# uint8_t yAdvance
+# uint8_t reserved = 0
+# Metadata:
+# uint32_t bitmapSize
+# uint32_t numGlyphs = last - first + 1
+# Data:
+# uint8_t bitmaps[bitmapSize]
+# PackedGlyph glyphs[numGlyphs]
+#   uint16_t bitmapOffset
+#   uint8_t width
+#   uint8_t height
+#   uint8_t xAdvance
+#   int8_t xOffset
+#   int8_t yOffset
+
+def convert_font_to_bin(font_path, pixel_size, out_bin_path):
     try:
         font1x = ImageFont.truetype(font_path, pixel_size)
     except Exception as e:
         print(f"Error loading font {font_path}: {e}")
-        return None
+        return False
 
     # Get line spacing (yAdvance)
     ascent, descent = font1x.getmetrics()
     yAdvance = ascent + descent
-    print(f"Font: {font_name_c}, Pixel Size: {pixel_size}, ascent: {ascent}, descent: {descent}, yAdvance: {yAdvance}")
+    print(f"Font: {os.path.basename(font_path)}, Size: {pixel_size}px, Ascent: {ascent}, Descent: {descent}, yAdvance: {yAdvance}")
 
-    # Pre-pass to find base_bottom using 'v', 'w', 'x', 'z' at 1x
+    # Pre-pass to find base_bottom using 'v', 'w', 'x', 'z'
     flat_bottoms = []
     for char in ['v', 'w', 'x', 'z']:
         try:
@@ -31,7 +55,6 @@ def convert_font(font_path, pixel_size, font_name_c):
             pass
     base_bottom = max(set(flat_bottoms), key=flat_bottoms.count) if flat_bottoms else -1
 
-    # Baseline-bound characters (must sit on the baseline)
     baseline_chars = (
         [chr(c) for c in range(65, 91) if chr(c) not in ['Q', 'J']] +
         [chr(c) for c in range(97, 123) if chr(c) not in ['g', 'j', 'p', 'q', 'y']] +
@@ -48,6 +71,10 @@ def convert_font(font_path, pixel_size, font_name_c):
     chars_to_convert.append((129, '”')) # right double quote
     chars_to_convert.append((130, '’')) # right single quote / apostrophe
     chars_to_convert.append((131, '…')) # ellipsis
+
+    first = chars_to_convert[0][0]
+    last = chars_to_convert[-1][0]
+    num_glyphs = last - first + 1
 
     for code, char in chars_to_convert:
         mask, offset = font1x.getmask2(char, mode="L", anchor="ls")
@@ -111,8 +138,6 @@ def convert_font(font_path, pixel_size, font_name_c):
             glyph_bytes.append(current_byte)
             
         glyphs.append({
-            'char': char,
-            'code': code,
             'offset': current_offset,
             'width': width,
             'height': height,
@@ -124,75 +149,41 @@ def convert_font(font_path, pixel_size, font_name_c):
         bitmaps.extend(glyph_bytes)
         current_offset += len(glyph_bytes)
 
-    # Format output code
-    out = []
-    out.append("#pragma once")
-    out.append('#include "GrayscaleFont.h"')
-    out.append("")
-    out.append(f"const uint8_t {font_name_c}Bitmaps[] PROGMEM = {{")
-    
-    bitmap_lines = []
-    for i in range(0, len(bitmaps), 12):
-        chunk = bitmaps[i:i+12]
-        hex_str = ", ".join(f"0x{b:02X}" for b in chunk)
-        bitmap_lines.append("    " + hex_str)
-    out.append(",\n".join(bitmap_lines))
-    out.append("};")
-    out.append("")
-    
-    out.append(f"const GrayscaleGlyph {font_name_c}Glyphs[] PROGMEM = {{")
-    glyph_lines = []
-    for g in glyphs:
-        comment = f"// 0x{g['code']:02X} '{g['char']}'" if g['code'] != 0x5C else f"// 0x{g['code']:02X} '\\'"
-        glyph_lines.append(f"    {{{g['offset']}, {g['width']}, {g['height']}, {g['xAdvance']}, {g['xOffset']}, {g['yOffset']}}}, {comment}")
-    out.append("\n".join(glyph_lines))
-    out.append("};")
-    out.append("")
-    
-    out.append(f"const GrayscaleFont {font_name_c} PROGMEM = {{")
-    out.append(f"    (uint8_t *){font_name_c}Bitmaps,")
-    out.append(f"    (GrayscaleGlyph *){font_name_c}Glyphs,")
-    out.append(f"    0x20, 0x{glyphs[-1]['code']:02X},")
-    out.append(f"    {yAdvance}")
-    out.append("};")
-    
-    return "\n".join(out)
+    # Ensure output dir exists
+    out_dir = os.path.dirname(out_bin_path)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir)
 
-def main():
-    fonts_dir = "fonts"
-    src_dir = "src"
-    
-    # Fonts configuration: (source_ttf, pixel_size, output_c_name, output_h_filename)
-    font_configs = [
-        # Bookerly Regular versions
-        ("Bookerly.ttf", 15, "Bookerly9pt7b", "Bookerly9pt7b.h"),
-        ("Bookerly.ttf", 18, "Bookerly12pt7b", "Bookerly12pt7b.h"),
-        ("Bookerly.ttf", 26, "Bookerly18pt7b", "Bookerly18pt7b.h"),
-        # Bookerly Bold version for menus
-        ("Bookerly Bold.ttf", 14, "Bookerly_Bold9pt7b", "Bookerly_Bold9pt7b.h"),
-        # Literata Regular versions
-        ("Literata-Regular.ttf", 14, "Literata9pt7b", "Literata9pt7b.h"),
-        ("Literata-Regular.ttf", 18, "Literata12pt7b", "Literata12pt7b.h"),
-        ("Literata-Regular.ttf", 26, "Literata18pt7b", "Literata18pt7b.h"),
-        # Amazon Ember Medium version for menus
-        ("Amazon-Ember-Medium.ttf", 14, "AmazonEmber_Medium9pt7b", "AmazonEmber_Medium9pt7b.h"),
-        ("Amazon-Ember-Medium.ttf", 18, "AmazonEmber_Medium12pt7b", "AmazonEmber_Medium12pt7b.h"),
-        # Atkinson Hyperlegible Next Regular versions
-        ("AtkinsonHyperlegibleNext-Regular.otf", 14, "AtkinsonHyperlegibleNext9pt7b", "AtkinsonHyperlegibleNext9pt7b.h"),
-        ("AtkinsonHyperlegibleNext-Regular.otf", 18, "AtkinsonHyperlegibleNext12pt7b", "AtkinsonHyperlegibleNext12pt7b.h"),
-        ("AtkinsonHyperlegibleNext-Regular.otf", 26, "AtkinsonHyperlegibleNext18pt7b", "AtkinsonHyperlegibleNext18pt7b.h")
-    ]
-    
-    for ttf_file, size, name_c, h_file in font_configs:
-        ttf_path = os.path.join(fonts_dir, ttf_file)
-        h_path = os.path.join(src_dir, h_file)
-        
-        print(f"Converting {ttf_path} ({size}px) to {h_path}...")
-        code = convert_font(ttf_path, size, name_c)
-        if code:
-            with open(h_path, "w", encoding="utf-8") as f:
-                f.write(code)
-            print("Done.")
+    # Write binary file
+    with open(out_bin_path, "wb") as f:
+        # Header (10 bytes): magic (4), first (2), last (2), yAdvance (1), reserved (1)
+        f.write(struct.pack("<4sHHBB", b"GFT2", first, last, yAdvance, 0))
+        # Metadata (8 bytes): bitmapSize (4), numGlyphs (4)
+        f.write(struct.pack("<II", len(bitmaps), num_glyphs))
+        # Bitmaps
+        f.write(bytes(bitmaps))
+        # Glyphs
+        for g in glyphs:
+            # GFXglyph struct format in file (7 bytes):
+            # uint16_t bitmapOffset
+            # uint8_t width
+            # uint8_t height
+            # uint8_t xAdvance
+            # int8_t xOffset
+            # int8_t yOffset
+            f.write(struct.pack("<HBBBbb", g['offset'], g['width'], g['height'], g['xAdvance'], g['xOffset'], g['yOffset']))
+            
+    print(f"Successfully generated {out_bin_path} (bitmap: {len(bitmaps)} bytes, glyphs: {num_glyphs * 7} bytes)")
+    return True
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) < 4:
+        print("Usage: python convert_to_bin_font.py <font_path> <pixel_size> <output_font_path>")
+        print("Example: python convert_to_bin_font.py Bookerly.ttf 18 Bookerly12.font")
+        sys.exit(1)
+
+    font_path = sys.argv[1]
+    pixel_size = int(sys.argv[2])
+    output_path = sys.argv[3]
+
+    convert_font_to_bin(font_path, pixel_size, output_path)

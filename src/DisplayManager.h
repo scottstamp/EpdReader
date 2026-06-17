@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "Config.h"
 #include <Adafruit_GFX.h>
+#include "GrayscaleFont.h"
 
 
 enum FontType { FONT_SANS, FONT_SERIF, FONT_MONO, FONT_LITERATA, FONT_ATKINSON };
@@ -15,6 +16,7 @@ public:
     virtual void prepare() {}
     virtual void render(Adafruit_GFX& display) = 0;
     virtual bool prefersFullRefresh() { return false; }
+    virtual bool isGrayscale() { return false; }
 };
 
 class ReaderView : public UIView {
@@ -63,6 +65,29 @@ private:
     int _percentage;
 };
 
+class LockscreenView : public UIView {
+public:
+    LockscreenView(const String& bookFilename, const String& bookTitle,
+                   int chapterIdx, int chapterCount, bool isChapterized,
+                   const String& chapterTitle, uint32_t fileOffset, uint32_t fileSize);
+    ~LockscreenView() override;
+    void prepare() override;
+    void render(Adafruit_GFX& display) override;
+    bool prefersFullRefresh() override { return true; }
+    bool isGrayscale() override { return true; }
+private:
+    String _bookFilename;
+    String _bookTitle;
+    int _chapterIdx;
+    int _chapterCount;
+    bool _isChapterized;
+    String _chapterTitle;
+    uint32_t _fileOffset;
+    uint32_t _fileSize;
+    uint8_t* _coverBuffer;
+    bool _coverLoaded;
+};
+
 class DisplayManager {
 public:
     static DisplayManager& getInstance();
@@ -98,6 +123,9 @@ public:
     void loadSettings();
     void saveSettings();
 
+    int getBatteryPercent();
+    void drawBattery(Adafruit_GFX& display);
+
     bool isWakeupFromSleep() const { return _isWakeupFromSleep; }
     void checkAndTriggerPreFetch(const String& filename);
 
@@ -108,6 +136,16 @@ public:
         _currentChapterTitle = title;
         _currentChapterSize = size;
     }
+
+    void unloadCustomFont();
+    void clearPageCache();
+
+    // Custom 2-bit font rendering engine
+    void drawGrayscaleChar(Adafruit_GFX& display, int16_t x, int16_t y, char c, const GrayscaleFont* font, bool grayscaleActive);
+    void drawGrayscaleString(Adafruit_GFX& display, int16_t x, int16_t y, const char* str, const GrayscaleFont* font, bool grayscaleActive);
+    void getGrayscaleTextBounds(const char* str, int16_t x, int16_t y, const GrayscaleFont* font, int16_t* x1, int16_t* y1, uint16_t* w, uint16_t* h);
+
+    bool isFullRefreshActive() const { return _isFullRefresh; }
 
     // Make ReaderView a friend so it can call drawPageText
     friend class ReaderView;
@@ -132,8 +170,18 @@ private:
     FontType _fontType;
     FontSize _fontSize;
 
+    // Custom font loaded from SD card
+    GrayscaleFont* _customFont;
+    String _customFontLoadedPath;
+    
+    const GrayscaleFont* resolveFont(FontType type, FontSize size);
+    const GrayscaleFont* loadCustomFont(const String& path);
+
     // Orientation settings
     bool _isFlipped;
+
+    // Refresh mode flag
+    bool _isFullRefresh;
 
     // Sleep wakeup status
     bool _isWakeupFromSleep;
@@ -153,7 +201,11 @@ private:
     uint32_t _pageCacheTrueStartOffset;
 
     void cachePageText(const String& filename, uint32_t startOffset);
-    void clearPageCache();
+
+    // Battery measurement rolling average history
+    int _batteryHistory[5];
+    int _batteryHistoryIndex;
+    bool _batteryHistoryInitialized;
 };
 
 #endif // DISPLAY_MANAGER_H

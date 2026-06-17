@@ -142,7 +142,7 @@ void BleManager::update() {
         // Read first line of temp.txt to get the title if not manually specified
         String title = _uploadTitle;
         if (title.length() == 0) {
-            Adafruit_LittleFS_Namespace::File tempFile = StorageManager::getInstance().openBook("temp.txt", "r");
+            FsFile tempFile = StorageManager::getInstance().openSDBook("temp.txt", O_RDONLY);
             if (tempFile) {
                 title = tempFile.readStringUntil('\n');
                 title.trim();
@@ -281,10 +281,10 @@ void BleManager::processCommand(const String& cmd) {
         delay(10);
         
         String books[MAX_BOOKS];
-        int count = StorageManager::getInstance().listBooks(books, MAX_BOOKS);
+        int count = StorageManager::getInstance().listSDBooks(books, MAX_BOOKS);
         for (int i = 0; i < count; i++) {
             // Get file size
-            Adafruit_LittleFS_Namespace::File f = StorageManager::getInstance().openBook(books[i], "r");
+            FsFile f = StorageManager::getInstance().openSDBook(books[i], O_RDONLY);
             uint32_t size = 0;
             if (f) {
                 size = f.size();

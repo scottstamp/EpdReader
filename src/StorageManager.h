@@ -31,6 +31,7 @@ public:
 
     // SD Card support methods
     bool beginSD();
+    bool sdExists(const String& path);
     int listSDBooks(String books[], int maxBooks);
     FsFile openSDBook(const String& filename, oflag_t oflag = O_RDONLY);
     uint8_t getSDErrorCode() { return sd.card() ? sd.card()->errorCode() : 0; }
@@ -51,7 +52,7 @@ private:
     void powerCyclePeripherals();
     bool recoverSDSoftware();
 
-    Adafruit_LittleFS_Namespace::File* _uploadFile;
+    FsFile _uploadFile;
     bool _isUploading;
     SdFat sd;
     bool _sdInitialized;

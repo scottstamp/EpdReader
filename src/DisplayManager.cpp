@@ -7,35 +7,33 @@
 #include "Bookerly18pt7b.h"
 #include "Bookerly9pt7b.h"
 #include "Bookerly_Bold9pt7b.h"
-#include "Literata9pt7b.h"
-#include "Literata12pt7b.h"
-#include "Literata18pt7b.h"
 #include "AmazonEmber_Medium9pt7b.h"
-#include "AtkinsonHyperlegibleNext9pt7b.h"
-#include "AtkinsonHyperlegibleNext12pt7b.h"
-#include "AtkinsonHyperlegibleNext18pt7b.h"
-#include <GxEPD2_BW.h>
-#include <gdey/GxEPD2_370_GDEY037T03.h>
+#include "AmazonEmber_Medium12pt7b.h"
+#include <GxEPD2_4G_4G.h>
+#include "GxEPD2_4G_370_GDEY037T03.h"
 #include <SPI.h>
 #include <SdFat.h>
 
 using namespace Adafruit_LittleFS_Namespace;
 using LfsFile = Adafruit_LittleFS_Namespace::File;
 
-// Instantiate EPD driver in B&W mode
-GxEPD2_BW<GxEPD2_370_GDEY037T03, GxEPD2_370_GDEY037T03::HEIGHT>
-    epd(GxEPD2_370_GDEY037T03(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
+// Instantiate EPD driver in 4G mode
+GxEPD2_4G_4G<GxEPD2_4G_370_GDEY037T03, GxEPD2_4G_370_GDEY037T03::HEIGHT>
+    epd(GxEPD2_4G_370_GDEY037T03(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
-static uint16_t getTextWidth(const char* str, const GFXfont* font) {
+static uint16_t getTextWidth(const char* str, const GrayscaleFont* font) {
   if (!str || !font) return 0;
   uint16_t w = 0;
+  uint8_t first = pgm_read_byte(&font->first);
+  uint8_t last  = pgm_read_byte(&font->last);
+  const GrayscaleGlyph* glyphPtr = (const GrayscaleGlyph*)pgm_read_ptr(&font->glyph);
   while (*str) {
-    uint8_t c = *str++;
-    if (c >= font->first && c <= font->last) {
-      w += font->glyph[c - font->first].xAdvance;
+    uint8_t c = (uint8_t)*str++;
+    if (c >= first && c <= last) {
+      w += pgm_read_byte(&glyphPtr[c - first].xAdvance);
     } else if (c == ' ') {
-      if (' ' >= font->first && ' ' <= font->last) {
-        w += font->glyph[' ' - font->first].xAdvance;
+      if (' ' >= first && ' ' <= last) {
+        w += pgm_read_byte(&glyphPtr[' ' - first].xAdvance);
       } else {
         w += 5;
       }
@@ -88,7 +86,12 @@ DisplayManager &DisplayManager::getInstance() {
 }
 
 DisplayManager::DisplayManager()
-    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false), _currentChapterTitle(""), _currentChapterSize(0) {
+    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _customFont(nullptr),
+      _customFontLoadedPath(""), _isFlipped(false), _isWakeupFromSleep(false),
+      _nextPageOffset(0), _displayNeedsReinit(false), _isFullRefresh(false),
+      _currentChapterTitle(""), _currentChapterSize(0),
+      _batteryHistoryIndex(0), _batteryHistoryInitialized(false) {
+  memset(_batteryHistory, 0, sizeof(_batteryHistory));
   clearHistory();
 }
 
@@ -132,11 +135,11 @@ void DisplayManager::begin() {
 
 void DisplayManager::clear() {
   powerUp();
-  epd.firstPage();
-  do {
-    epd.fillScreen(GxEPD_WHITE);
-  } while (epd.nextPage());
-  powerDown();
+  // Use the driver's clearScreen() which properly initializes BOTH bitplane
+  // registers (0x10 previous + 0x13 current) to white via a monochrome full
+  // refresh, leaving _grayscale_mode in a known-false state.
+  epd.clearScreen(0xFF);
+  _isFullRefresh = false; // reset after clear so next draw sets it correctly
 }
 
 void DisplayManager::powerDown() { epd.powerOff(); }
@@ -401,10 +404,8 @@ uint32_t DisplayManager::drawPageText(const String &filename,
 
   if (copyLen <= 0) {
     if (performRender) {
-      epd.setFont(&AtkinsonHyperlegibleNext9pt7b);
-      epd.setTextColor(GxEPD_BLACK);
-      epd.setCursor(10, 45);
-      epd.print("End of book reached.");
+      drawGrayscaleString(*reinterpret_cast<Adafruit_GFX*>(&epd), 10, 45,
+                         "End of book reached.", &Bookerly9pt7b, _isFullRefresh);
     }
     _nextPageOffset = trueStartOffset;
     return trueStartOffset;
@@ -412,37 +413,11 @@ uint32_t DisplayManager::drawPageText(const String &filename,
 
   preprocessUtf8(buffer, copyLen);
 
-  const GFXfont *selectedFont = &AtkinsonHyperlegibleNext9pt7b;
-
-  if (_fontType == FONT_SANS || _fontType == FONT_MONO || _fontType == FONT_ATKINSON) {
-    if (_fontSize == SIZE_SMALL) {
-      selectedFont = &AtkinsonHyperlegibleNext9pt7b;
-    } else if (_fontSize == SIZE_MEDIUM) {
-      selectedFont = &AtkinsonHyperlegibleNext12pt7b;
-    } else if (_fontSize == SIZE_LARGE) {
-      selectedFont = &AtkinsonHyperlegibleNext18pt7b;
-    }
-  } else if (_fontType == FONT_SERIF) {
-    if (_fontSize == SIZE_SMALL) {
-      selectedFont = &Bookerly9pt7b;
-    } else if (_fontSize == SIZE_MEDIUM) {
-      selectedFont = &Bookerly12pt7b;
-    } else if (_fontSize == SIZE_LARGE) {
-      selectedFont = &Bookerly18pt7b;
-    }
-  } else if (_fontType == FONT_LITERATA) {
-    if (_fontSize == SIZE_SMALL) {
-      selectedFont = &Literata9pt7b;
-    } else if (_fontSize == SIZE_MEDIUM) {
-      selectedFont = &Literata12pt7b;
-    } else if (_fontSize == SIZE_LARGE) {
-      selectedFont = &Literata18pt7b;
-    }
-  }
+  const GrayscaleFont *selectedFont = resolveFont(_fontType, _fontSize);
 
   int line_height = selectedFont->yAdvance;
   int y_start = line_height - 3;
-  if (selectedFont == &AtkinsonHyperlegibleNext9pt7b || selectedFont == &AtkinsonHyperlegibleNext12pt7b) {
+  if (_fontType == FONT_ATKINSON) {
     y_start = line_height - 2;
   }
 
@@ -467,11 +442,6 @@ uint32_t DisplayManager::drawPageText(const String &filename,
 
   uint32_t wordStart = idx;
   bool inWord = false;
-
-  if (performRender) {
-    epd.setFont(selectedFont);
-    epd.setTextColor(GxEPD_BLACK);
-  }
 
   while (idx <= copyLen && cur_y <= y_end) {
     char c = buffer[idx];
@@ -498,8 +468,9 @@ uint32_t DisplayManager::drawPageText(const String &filename,
 
         if (performRender) {
           buffer[idx] = '\0';
-          epd.setCursor(cur_x, cur_y);
-          epd.print(&buffer[wordStart]);
+          drawGrayscaleString(*reinterpret_cast<Adafruit_GFX*>(&epd),
+                              cur_x, cur_y, &buffer[wordStart],
+                              selectedFont, _isFullRefresh);
           buffer[idx] = temp;
         }
 
@@ -598,11 +569,12 @@ void MenuView::render(Adafruit_GFX& display) {
     }
   }
 
+  bool gsActive = DisplayManager::getInstance().isFullRefreshActive();
+
   // Header
   display.setTextColor(GxEPD_BLACK);
-  display.setFont(&AmazonEmber_Medium9pt7b);
-  display.setCursor(10, 15);
-  display.print(_header.c_str());
+  DisplayManager::getInstance().drawGrayscaleString(display, 10, 15, _header.c_str(), &AmazonEmber_Medium12pt7b, gsActive);
+  DisplayManager::getInstance().drawBattery(display);
   display.drawFastHLine(0, 22, display.width(), GxEPD_BLACK);
 
   // Render Options within viewport
@@ -612,12 +584,11 @@ void MenuView::render(Adafruit_GFX& display) {
   for (int i = startVisibleIdx; i < endVisibleIdx; i++) {
     int displayIdx = i - startVisibleIdx;
     int y = startY + displayIdx * itemHeight;
-    display.setCursor(i == _selectedIdx ? 10 : 20, y);
     if (i == _selectedIdx) {
       String opt = "> " + _options[i];
-      display.print(opt.c_str());
+      DisplayManager::getInstance().drawGrayscaleString(display, 10, y, opt.c_str(), &AmazonEmber_Medium9pt7b, gsActive);
     } else {
-      display.print(_options[i].c_str());
+      DisplayManager::getInstance().drawGrayscaleString(display, 20, y, _options[i].c_str(), &AmazonEmber_Medium9pt7b, gsActive);
     }
   }
 
@@ -642,11 +613,12 @@ MessageView::MessageView(const String& title, const String& msg, bool isAlert)
     : _title(title), _msg(msg), _isAlert(isAlert) {}
 
 void MessageView::render(Adafruit_GFX& display) {
+  bool gsActive = DisplayManager::getInstance().isFullRefreshActive();
+
   // Header
   display.setTextColor(_isAlert ? GxEPD_RED : GxEPD_BLACK);
-  display.setFont(&AmazonEmber_Medium9pt7b);
-  display.setCursor(10, 15);
-  display.print(_title.c_str());
+  DisplayManager::getInstance().drawGrayscaleString(display, 10, 15, _title.c_str(), &AmazonEmber_Medium12pt7b, gsActive);
+  DisplayManager::getInstance().drawBattery(display);
   display.drawFastHLine(0, 22, display.width(), GxEPD_BLACK);
 
   // Message body
@@ -662,15 +634,16 @@ void MessageView::render(Adafruit_GFX& display) {
       y += 19;
     } else {
       int advance = 8;
-      if (c >= AmazonEmber_Medium9pt7b.first && c <= AmazonEmber_Medium9pt7b.last) {
-        advance = AmazonEmber_Medium9pt7b.glyph[c - AmazonEmber_Medium9pt7b.first].xAdvance;
+      if (c >= AmazonEmber_Medium12pt7b.first && c <= AmazonEmber_Medium12pt7b.last) {
+        advance = pgm_read_byte(&AmazonEmber_Medium12pt7b.glyph[c - AmazonEmber_Medium12pt7b.first].xAdvance);
       }
       if (x + advance > display.width() - 16) {
         x = 10;
         y += 19;
       }
-      display.setCursor(x, y);
-      display.write(c);
+      // Draw single char using grayscale engine
+      char tmp[2] = {c, '\0'};
+      DisplayManager::getInstance().drawGrayscaleString(display, x, y, tmp, &AmazonEmber_Medium12pt7b, gsActive);
       x += advance;
     }
   }
@@ -681,16 +654,16 @@ ProgressView::ProgressView(const String& task, int percentage)
     : _task(task), _percentage(percentage) {}
 
 void ProgressView::render(Adafruit_GFX& display) {
+  bool gsActive = DisplayManager::getInstance().isFullRefreshActive();
+
   // Header
   display.setTextColor(GxEPD_BLACK);
-  display.setFont(&AmazonEmber_Medium9pt7b);
-  display.setCursor(10, 15);
-  display.print("BLE File Upload");
+  DisplayManager::getInstance().drawGrayscaleString(display, 10, 15, "BLE File Upload", &AmazonEmber_Medium12pt7b, gsActive);
+  DisplayManager::getInstance().drawBattery(display);
   display.drawFastHLine(0, 22, display.width(), GxEPD_BLACK);
 
   // Task name
-  display.setCursor(15, 50);
-  display.print(_task.c_str());
+  DisplayManager::getInstance().drawGrayscaleString(display, 15, 50, _task.c_str(), &AmazonEmber_Medium9pt7b, gsActive);
 
   // Progress bar container
   int barWidth = 256;
@@ -703,8 +676,178 @@ void ProgressView::render(Adafruit_GFX& display) {
 
   // Percentage text
   String pctStr = String(_percentage) + "%";
-  display.setCursor(display.width() / 2 - 16, 110);
-  display.print(pctStr.c_str());
+  DisplayManager::getInstance().drawGrayscaleString(display, display.width() / 2 - 16, 110, pctStr.c_str(), &AmazonEmber_Medium9pt7b, gsActive);
+}
+
+// LockscreenView
+LockscreenView::LockscreenView(const String& bookFilename, const String& bookTitle,
+                               int chapterIdx, int chapterCount, bool isChapterized,
+                               const String& chapterTitle, uint32_t fileOffset, uint32_t fileSize)
+    : _bookFilename(bookFilename), _bookTitle(bookTitle),
+      _chapterIdx(chapterIdx), _chapterCount(chapterCount), _isChapterized(isChapterized),
+      _chapterTitle(chapterTitle), _fileOffset(fileOffset), _fileSize(fileSize),
+      _coverBuffer(nullptr), _coverLoaded(false) {}
+
+LockscreenView::~LockscreenView() {
+  if (_coverBuffer) {
+    free(_coverBuffer);
+  }
+}
+
+void LockscreenView::prepare() {
+  _coverLoaded = false;
+  _coverBuffer = nullptr;
+
+  String coverPath = "";
+  if (_bookFilename.startsWith("[SD]")) {
+    String realPath = _bookFilename.substring(4); // Remove "[SD]"
+    int lastSlash = realPath.lastIndexOf('/');
+    if (lastSlash >= 0) {
+      coverPath = realPath.substring(0, lastSlash + 1) + "cover.mono";
+    } else {
+      int dotIdx = realPath.lastIndexOf('.');
+      if (dotIdx >= 0) {
+        coverPath = realPath.substring(0, dotIdx) + ".mono";
+      } else {
+        coverPath = realPath + ".mono";
+      }
+    }
+  }
+
+  if (coverPath.length() > 0) {
+    Serial.print("[Lockscreen] Opening cover file: ");
+    Serial.println(coverPath);
+    FsFile file = StorageManager::getInstance().openSDBook(coverPath, O_RDONLY);
+    if (file) {
+      uint32_t size = file.size();
+      Serial.print("[Lockscreen] Cover file size: ");
+      Serial.println(size);
+      
+      // Expected size is exactly 9600 bytes (160x240 @ 2bpp)
+      if (size > 0 && size <= 12000) {
+        _coverBuffer = (uint8_t*)malloc(size);
+        if (_coverBuffer) {
+          int readBytes = file.read(_coverBuffer, size);
+          if (readBytes == (int)size) {
+            _coverLoaded = true;
+            Serial.println("[Lockscreen] Cover image loaded successfully.");
+          } else {
+            Serial.println("[Lockscreen] Failed to read expected bytes from cover file.");
+            free(_coverBuffer);
+            _coverBuffer = nullptr;
+          }
+        } else {
+          Serial.println("[Lockscreen] Memory allocation for cover buffer failed.");
+        }
+      } else {
+        Serial.println("[Lockscreen] Invalid cover file size.");
+      }
+      file.close();
+    } else {
+      Serial.println("[Lockscreen] Cover file not found.");
+    }
+  }
+}
+
+void LockscreenView::render(Adafruit_GFX& display) {
+  // Draw cover on the left
+  if (_coverLoaded && _coverBuffer) {
+    // Draw 2-bit grayscale cover pixel-by-pixel
+    for (int16_t y = 0; y < 240; y++) {
+      for (int16_t x = 0; x < 160; x++) {
+        uint32_t pixel_idx = y * 160 + x;
+        uint32_t byte_idx = pixel_idx / 4;
+        uint8_t bit_shift = 2 * (3 - (pixel_idx % 4));
+        uint8_t val = (_coverBuffer[byte_idx] >> bit_shift) & 0x03;
+        
+        uint16_t color;
+        if (val == 0) color = GxEPD_BLACK;
+        else if (val == 1) color = GxEPD_DARKGREY;
+        else if (val == 2) color = GxEPD_LIGHTGREY;
+        else color = GxEPD_WHITE;
+        
+        display.drawPixel(10 + x, y, color);
+      }
+    }
+  } else {
+    // Draw placeholder box
+    display.drawRect(10, 10, 160, 220, GxEPD_BLACK);
+    display.setTextColor(GxEPD_BLACK);
+    DisplayManager::getInstance().drawGrayscaleString(display, 45, 120, "NO COVER",
+                                                      &AmazonEmber_Medium12pt7b, true);
+  }
+
+  // Draw battery gauge at the top right
+  DisplayManager::getInstance().drawBattery(display);
+
+  // Grayscale is always true for lockscreen (it uses full refresh)
+  bool gsActive = true;
+
+  // Draw title and progress on the right (starting x = 190)
+  display.setTextColor(GxEPD_BLACK);
+  
+  int curX = 190;
+  int curY = 40; // Starting Y coordinate for title
+  int line_height = pgm_read_byte(&Bookerly12pt7b.yAdvance);
+  int x_max = display.width() - 10;
+  
+  // Split _bookTitle into words and draw them with wrapping
+  String title = _bookTitle;
+  int space_width = 6;
+  if (' ' >= pgm_read_byte(&Bookerly12pt7b.first) && ' ' <= pgm_read_byte(&Bookerly12pt7b.last)) {
+    space_width = pgm_read_byte(&((const GrayscaleGlyph*)pgm_read_ptr(&Bookerly12pt7b.glyph))[' ' - pgm_read_byte(&Bookerly12pt7b.first)].xAdvance);
+  }
+  
+  unsigned int startIdx = 0;
+  while (startIdx < title.length()) {
+    int nextSpace = title.indexOf(' ', startIdx);
+    String word;
+    if (nextSpace >= 0) {
+      word = title.substring(startIdx, nextSpace);
+      startIdx = nextSpace + 1;
+    } else {
+      word = title.substring(startIdx);
+      startIdx = title.length();
+    }
+    
+    uint16_t word_w = getTextWidth(word.c_str(), &Bookerly12pt7b);
+    
+    if (curX + word_w > x_max) {
+      curX = 190;
+      curY += line_height;
+      if (curY > 110) {
+        DisplayManager::getInstance().drawGrayscaleString(display, curX, curY - line_height, "...", &Bookerly12pt7b, gsActive);
+        break;
+      }
+    }
+    
+    DisplayManager::getInstance().drawGrayscaleString(display, curX, curY, word.c_str(), &Bookerly12pt7b, gsActive);
+    curX += word_w + space_width;
+  }
+
+  // Separator line
+  display.drawFastHLine(190, 125, display.width() - 190 - 10, GxEPD_BLACK);
+
+  // Progress/Chapter details
+  display.setTextColor(GxEPD_BLACK);
+
+  int percent = 0;
+  if (_fileSize > 0) {
+    percent = (_fileOffset * 100) / _fileSize;
+  }
+
+  if (_isChapterized) {
+    DisplayManager::getInstance().drawGrayscaleString(display, 190, 145, ("Chapter " + String(_chapterIdx + 1)).c_str(), &AmazonEmber_Medium9pt7b, gsActive);
+    DisplayManager::getInstance().drawGrayscaleString(display, 190, 163, (String(percent) + "% of chapter").c_str(), &AmazonEmber_Medium9pt7b, gsActive);
+  } else {
+    DisplayManager::getInstance().drawGrayscaleString(display, 190, 145, "Progress", &AmazonEmber_Medium9pt7b, gsActive);
+    DisplayManager::getInstance().drawGrayscaleString(display, 190, 163, (String(percent) + "% of book").c_str(), &AmazonEmber_Medium9pt7b, gsActive);
+  }
+
+  // Triple click instructions
+  int unlockY = 210;
+  DisplayManager::getInstance().drawGrayscaleString(display, 190, unlockY, "Triple-press Select", &AmazonEmber_Medium9pt7b, gsActive);
+  DisplayManager::getInstance().drawGrayscaleString(display, 190, unlockY + 14, "to unlock...", &AmazonEmber_Medium9pt7b, gsActive);
 }
 
 // ==================== DisplayManager Draw Controller ====================
@@ -712,16 +855,152 @@ void ProgressView::render(Adafruit_GFX& display) {
 void DisplayManager::draw(UIView& view) {
   view.prepare();
   powerUp();
-  bool forceFull = view.prefersFullRefresh() || EPAPER_3COLOR;
-  if (!forceFull) {
-    epd.setPartialWindow(0, 0, epd.width(), epd.height());
+  if (view.isGrayscale()) {
+    // Full 4-grey refresh for grayscale views (lockscreen, cover art)
+    _isFullRefresh = true;
+    epd.epd2.setGrayscaleMode(true); // ensure CDI 0x87 for grayscale
+    GxEPD2_4G_4G_R<GxEPD2_4G_370_GDEY037T03, GxEPD2_4G_370_GDEY037T03::HEIGHT> epd_4g(epd.epd2);
+    epd_4g.firstPage();
+    do {
+      epd_4g.fillScreen(GxEPD_WHITE);
+      view.render(epd_4g);
+    } while (epd_4g.nextPage());
+  } else {
+    bool forceFull = view.prefersFullRefresh() || EPAPER_3COLOR;
+    _isFullRefresh = forceFull;
+    // Reset grayscale mode so _Update_Full() uses CDI 0x97 (monochrome),
+    // not 0x87 which was left set by writeImage_4G() in a prior draw.
+    epd.epd2.setGrayscaleMode(false);
+    if (!forceFull) {
+      epd.setPartialWindow(0, 0, epd.width(), epd.height());
+    }
+    epd.firstPage();
+    do {
+      epd.fillScreen(GxEPD_WHITE);
+      view.render(epd);
+    } while (epd.nextPage());
   }
-  epd.firstPage();
-  do {
-    epd.fillScreen(GxEPD_WHITE);
-    view.render(epd);
-  } while (epd.nextPage());
   powerDown();
+}
+
+// ==================== Grayscale Font Rendering Engine ====================
+
+void DisplayManager::drawGrayscaleChar(Adafruit_GFX& display, int16_t x, int16_t y,
+                                       char c, const GrayscaleFont* font,
+                                       bool grayscaleActive) {
+  uint8_t first = pgm_read_byte(&font->first);
+  uint8_t last  = pgm_read_byte(&font->last);
+  if ((uint8_t)c < first || (uint8_t)c > last) return;
+
+  const GrayscaleGlyph* glyphPtr = (const GrayscaleGlyph*)pgm_read_ptr(&font->glyph);
+  const GrayscaleGlyph* gPtr = &glyphPtr[(uint8_t)c - first];
+
+  uint32_t offset  = pgm_read_dword(&gPtr->bitmapOffset);
+  uint8_t  w       = pgm_read_byte(&gPtr->width);
+  uint8_t  h       = pgm_read_byte(&gPtr->height);
+  int8_t   xo      = (int8_t)pgm_read_byte(&gPtr->xOffset);
+  int8_t   yo      = (int8_t)pgm_read_byte(&gPtr->yOffset);
+
+  if (w == 0 || h == 0) return;
+
+  const uint8_t* bitmap = (const uint8_t*)pgm_read_ptr(&font->bitmap);
+  uint32_t bitOffset = offset * 8; // bitmapOffset is in bytes
+
+  for (uint8_t row = 0; row < h; row++) {
+    for (uint8_t col = 0; col < w; col++) {
+      uint32_t byteIdx  = bitOffset / 8;
+      uint8_t  bitShift = 6 - (bitOffset % 8); // MSB-first 2-bit packing
+      uint8_t  val = (pgm_read_byte(&bitmap[byteIdx]) >> bitShift) & 0x03;
+      bitOffset += 2;
+
+      if (val > 0) {
+        uint16_t color;
+        if (!grayscaleActive || val == 3) {
+          color = GxEPD_BLACK;
+        } else if (val == 2) {
+          color = GxEPD_DARKGREY;
+        } else { // val == 1
+          color = GxEPD_LIGHTGREY;
+        }
+        display.drawPixel(x + xo + col, y + yo + row, color);
+      }
+    }
+  }
+}
+
+void DisplayManager::drawGrayscaleString(Adafruit_GFX& display, int16_t x, int16_t y,
+                                          const char* str, const GrayscaleFont* font,
+                                          bool grayscaleActive) {
+  if (!str || !font) return;
+  uint8_t first = pgm_read_byte(&font->first);
+  uint8_t last  = pgm_read_byte(&font->last);
+  const GrayscaleGlyph* glyphPtr = (const GrayscaleGlyph*)pgm_read_ptr(&font->glyph);
+
+  int16_t curX = x;
+  while (*str) {
+    uint8_t c = (uint8_t)*str++;
+    if (c >= first && c <= last) {
+      drawGrayscaleChar(display, curX, y, (char)c, font, grayscaleActive);
+      curX += pgm_read_byte(&glyphPtr[c - first].xAdvance);
+    } else if (c == ' ') {
+      if (' ' >= first && ' ' <= last) {
+        curX += pgm_read_byte(&glyphPtr[' ' - first].xAdvance);
+      } else {
+        curX += 5;
+      }
+    }
+  }
+}
+
+void DisplayManager::getGrayscaleTextBounds(const char* str, int16_t x, int16_t y,
+                                             const GrayscaleFont* font,
+                                             int16_t* x1, int16_t* y1,
+                                             uint16_t* w, uint16_t* h) {
+  if (!str || !font) {
+    if (x1) *x1 = x; if (y1) *y1 = y;
+    if (w) *w = 0;  if (h) *h = 0;
+    return;
+  }
+  uint8_t first    = pgm_read_byte(&font->first);
+  uint8_t last     = pgm_read_byte(&font->last);
+  uint8_t yAdvance = pgm_read_byte(&font->yAdvance);
+  const GrayscaleGlyph* glyphPtr = (const GrayscaleGlyph*)pgm_read_ptr(&font->glyph);
+
+  int16_t minX = 32767, minY = 32767, maxX = -32767, maxY = -32767;
+  int16_t curX = x;
+  const char* p = str;
+  while (*p) {
+    uint8_t c = (uint8_t)*p++;
+    if (c >= first && c <= last) {
+      const GrayscaleGlyph* g = &glyphPtr[c - first];
+      uint8_t gw = pgm_read_byte(&g->width);
+      uint8_t gh = pgm_read_byte(&g->height);
+      int8_t  gxo = (int8_t)pgm_read_byte(&g->xOffset);
+      int8_t  gyo = (int8_t)pgm_read_byte(&g->yOffset);
+      uint8_t xa  = pgm_read_byte(&g->xAdvance);
+      if (gw > 0 && gh > 0) {
+        int16_t lx = curX + gxo;
+        int16_t ly = y + gyo;
+        if (lx < minX) minX = lx;
+        if (ly < minY) minY = ly;
+        if (lx + gw > maxX) maxX = lx + gw;
+        if (ly + gh > maxY) maxY = ly + gh;
+      }
+      curX += xa;
+    } else if (c == ' ') {
+      curX += (' ' >= first && ' ' <= last)
+              ? pgm_read_byte(&glyphPtr[' ' - first].xAdvance) : 5;
+    }
+  }
+  if (minX == 32767) {
+    // empty / whitespace-only string
+    if (x1) *x1 = x; if (y1) *y1 = y - yAdvance;
+    if (w) *w = 0; if (h) *h = yAdvance;
+  } else {
+    if (x1) *x1 = minX; if (y1) *y1 = minY;
+    if (w) *w = (uint16_t)(maxX - minX);
+    if (h) *h = (uint16_t)(maxY - minY);
+  }
 }
 
 void DisplayManager::setFontType(FontType type) {
@@ -858,6 +1137,231 @@ void DisplayManager::checkAndTriggerPreFetch(const String& filename) {
       Serial.println("[BLE Cache] Pre-fetch complete.");
     }
   }
+}
+
+void DisplayManager::unloadCustomFont() {
+  if (_customFont) {
+    if (_customFont->bitmap) {
+      free((void*)_customFont->bitmap);
+    }
+    if (_customFont->glyph) {
+      free((void*)_customFont->glyph);
+    }
+    free(_customFont);
+    _customFont = nullptr;
+  }
+  _customFontLoadedPath = "";
+}
+
+const GrayscaleFont* DisplayManager::loadCustomFont(const String& path) {
+  if (_customFontLoadedPath == path && _customFont != nullptr) {
+    return _customFont;
+  }
+
+  unloadCustomFont();
+
+  Serial.print("[Font Loader] Loading font: ");
+  Serial.println(path);
+
+  FsFile file = StorageManager::getInstance().openSDBook(path, O_RDONLY);
+  if (!file) {
+    Serial.println("[Font Loader] Failed to open font file.");
+    return nullptr;
+  }
+
+  char magic[4];
+  if (file.read(magic, 4) != 4 || memcmp(magic, "GFT2", 4) != 0) {
+    Serial.println("[Font Loader] Invalid magic bytes (expected GFT2).");
+    file.close();
+    return nullptr;
+  }
+
+  uint16_t first = 0;
+  uint16_t last = 0;
+  uint8_t yAdvance = 0;
+  uint8_t reserved = 0;
+
+  if (file.read(&first, 2) != 2 ||
+      file.read(&last, 2) != 2 ||
+      file.read(&yAdvance, 1) != 1 ||
+      file.read(&reserved, 1) != 1) {
+    Serial.println("[Font Loader] Failed to read header.");
+    file.close();
+    return nullptr;
+  }
+
+  uint32_t bitmapSize = 0;
+  uint32_t numGlyphs = 0;
+  if (file.read(&bitmapSize, 4) != 4 ||
+      file.read(&numGlyphs, 4) != 4) {
+    Serial.println("[Font Loader] Failed to read metadata.");
+    file.close();
+    return nullptr;
+  }
+
+  if (numGlyphs != (uint32_t)(last - first + 1)) {
+    Serial.println("[Font Loader] Glyph count mismatch.");
+    file.close();
+    return nullptr;
+  }
+
+  uint8_t* ramBitmap = (uint8_t*)malloc(bitmapSize);
+  GrayscaleGlyph* ramGlyphs = (GrayscaleGlyph*)malloc(numGlyphs * sizeof(GrayscaleGlyph));
+  GrayscaleFont* ramFont = (GrayscaleFont*)malloc(sizeof(GrayscaleFont));
+
+  if (!ramBitmap || !ramGlyphs || !ramFont) {
+    Serial.println("[Font Loader] Memory allocation failed!");
+    if (ramBitmap) free(ramBitmap);
+    if (ramGlyphs) free(ramGlyphs);
+    if (ramFont) free(ramFont);
+    file.close();
+    return nullptr;
+  }
+
+  if (file.read(ramBitmap, bitmapSize) != (int32_t)bitmapSize) {
+    Serial.println("[Font Loader] Failed to read bitmaps.");
+    free(ramBitmap);
+    free(ramGlyphs);
+    free(ramFont);
+    file.close();
+    return nullptr;
+  }
+
+  // GFT2 glyph struct on disk: uint16_t offset, uint8_t w, h, xAdv, int8_t xOff, yOff (7 bytes)
+  for (uint32_t i = 0; i < numGlyphs; i++) {
+    uint16_t offset = 0;
+    uint8_t width = 0;
+    uint8_t height = 0;
+    uint8_t xAdvance = 0;
+    int8_t xOffset = 0;
+    int8_t yOffset = 0;
+
+    if (file.read(&offset, 2) != 2 ||
+        file.read(&width, 1) != 1 ||
+        file.read(&height, 1) != 1 ||
+        file.read(&xAdvance, 1) != 1 ||
+        file.read(&xOffset, 1) != 1 ||
+        file.read(&yOffset, 1) != 1) {
+      Serial.println("[Font Loader] Failed to read glyph data.");
+      free(ramBitmap);
+      free(ramGlyphs);
+      free(ramFont);
+      file.close();
+      return nullptr;
+    }
+
+    ramGlyphs[i].bitmapOffset = offset;
+    ramGlyphs[i].width        = width;
+    ramGlyphs[i].height       = height;
+    ramGlyphs[i].xAdvance     = xAdvance;
+    ramGlyphs[i].xOffset      = xOffset;
+    ramGlyphs[i].yOffset      = yOffset;
+  }
+
+  file.close();
+
+  ramFont->bitmap   = ramBitmap;
+  ramFont->glyph    = ramGlyphs;
+  ramFont->first    = (uint8_t)first;
+  ramFont->last     = (uint8_t)last;
+  ramFont->yAdvance = yAdvance;
+
+  _customFont = ramFont;
+  _customFontLoadedPath = path;
+
+  Serial.print("[Font Loader] Successfully loaded GFT2 font: ");
+  Serial.println(path);
+
+  return _customFont;
+}
+
+const GrayscaleFont* DisplayManager::resolveFont(FontType type, FontSize size) {
+  String fontName = "";
+  if (type == FONT_SANS) fontName = "Sans";
+  else if (type == FONT_SERIF) fontName = "Serif";
+  else if (type == FONT_MONO) fontName = "Mono";
+  else if (type == FONT_LITERATA) fontName = "Literata";
+  else if (type == FONT_ATKINSON) fontName = "Atkinson";
+
+  String sizeName = "";
+  if (size == SIZE_SMALL) sizeName = "9";
+  else if (size == SIZE_MEDIUM) sizeName = "12";
+  else if (size == SIZE_LARGE) sizeName = "18";
+
+  String fontPath = "/fonts/" + fontName + sizeName + ".font";
+
+  if (StorageManager::getInstance().sdExists(fontPath)) {
+    const GrayscaleFont* custom = loadCustomFont(fontPath);
+    if (custom) {
+      return custom;
+    }
+  }
+
+  unloadCustomFont();
+
+  // Fallback to built-in Bookerly if the SD card font file is missing
+  if (size == SIZE_SMALL) return &Bookerly9pt7b;
+  if (size == SIZE_MEDIUM) return &Bookerly12pt7b;
+  return &Bookerly18pt7b;
+}
+
+extern "C" uint32_t analogReadVDDHDIV5(void);
+
+int DisplayManager::getBatteryPercent() {
+#ifdef SAADC_CH_PSELP_PSELP_VDDHDIV5
+  float vbat = (analogReadVDDHDIV5() * 3.0f / 1024.0f) * 5.0f;
+#else
+  float vbat = (analogRead(PIN_BATTERY) * 3.3f / 1024.0f) * BATTERY_DIVIDER;
+#endif
+  int batPercent = map(vbat * 100, 330, 420, 0, 100);
+  batPercent = constrain(batPercent, 0, 100);
+
+  if (!_batteryHistoryInitialized) {
+    for (int i = 0; i < 5; i++) {
+      _batteryHistory[i] = batPercent;
+    }
+    _batteryHistoryInitialized = true;
+    _batteryHistoryIndex = 0;
+  } else {
+    _batteryHistory[_batteryHistoryIndex] = batPercent;
+    _batteryHistoryIndex = (_batteryHistoryIndex + 1) % 5;
+  }
+
+  int sum = 0;
+  for (int i = 0; i < 5; i++) {
+    sum += _batteryHistory[i];
+  }
+  return sum / 5;
+}
+
+void DisplayManager::drawBattery(Adafruit_GFX& display) {
+  int percent = getBatteryPercent();
+  
+  String pctStr = String(percent) + "%";
+  
+  // Position battery gauge icon on the far right
+  int batteryWidth = 20;
+  int batteryHeight = 10;
+  int batteryX = display.width() - batteryWidth - 10;
+  int batteryY = 6;
+  
+  // Draw battery body outline
+  display.drawRect(batteryX, batteryY, batteryWidth, batteryHeight, GxEPD_BLACK);
+  
+  // Draw battery tip
+  display.fillRect(batteryX + batteryWidth, batteryY + 3, 2, 4, GxEPD_BLACK);
+  
+  // Draw battery charge fill
+  int fillWidth = map(percent, 0, 100, 0, batteryWidth - 4);
+  if (fillWidth > 0) {
+    display.fillRect(batteryX + 2, batteryY + 2, fillWidth, batteryHeight - 4, GxEPD_BLACK);
+  }
+  
+  // Draw percentage text next to it (to the left)
+  int textX = batteryX - 5 - (percent >= 100 ? 36 : (percent >= 10 ? 28 : 20));
+  // Use grayscale renderer for battery % text; use _isFullRefresh for antialiasing mode
+  drawGrayscaleString(display, textX, batteryY + 9, pctStr.c_str(),
+                      &AmazonEmber_Medium9pt7b, _isFullRefresh);
 }
 
 
