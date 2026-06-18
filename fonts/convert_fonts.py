@@ -168,6 +168,7 @@ def main():
         ("Literata-Regular.ttf", 26, "Literata18pt7b", "Literata18pt7b.h"),
         # Amazon Ember Medium version for menus
         ("Amazon-Ember-Medium.ttf", 14, "AmazonEmber_Medium9pt7b", "AmazonEmber_Medium9pt7b.h"),
+        ("Amazon-Ember-Medium.ttf", 18, "AmazonEmber_Medium12pt7b", "AmazonEmber_Medium12pt7b.h"),
         # Atkinson Hyperlegible Next Regular versions
         ("AtkinsonHyperlegibleNext-Regular.otf", 14, "AtkinsonHyperlegibleNext9pt7b", "AtkinsonHyperlegibleNext9pt7b.h"),
         ("AtkinsonHyperlegibleNext-Regular.otf", 18, "AtkinsonHyperlegibleNext12pt7b", "AtkinsonHyperlegibleNext12pt7b.h"),
