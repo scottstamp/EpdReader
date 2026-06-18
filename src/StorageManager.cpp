@@ -29,12 +29,14 @@ void msc_flush_cb(void) {
 using namespace Adafruit_LittleFS_Namespace;
 using LfsFile = Adafruit_LittleFS_Namespace::File;
 
+static String getBookmarkFilename(const String& filename);
+
 StorageManager& StorageManager::getInstance() {
     static StorageManager instance;
     return instance;
 }
 
-StorageManager::StorageManager() : _uploadFile(nullptr), _isUploading(false), _sdInitialized(false) {}
+StorageManager::StorageManager() : _isUploading(false), _sdInitialized(false) {}
 
 bool StorageManager::begin() {
     // Initialize USB Mass Storage interface
@@ -131,42 +133,51 @@ int StorageManager::listBooks(String books[], int maxBooks) {
 }
 
 bool StorageManager::deleteBook(const String& filename) {
-    String fullPath = String(BOOK_DIR) + "/" + filename;
-    String bmkPath = fullPath + ".bmk";
-    if (InternalFS.exists(bmkPath.c_str())) {
-        InternalFS.remove(bmkPath.c_str());
+    if (!beginSD()) return false;
+    String fullPath = "/" + filename;
+    String bmkPath = "/bookmarks/" + getBookmarkFilename(filename) + ".bmk";
+    if (sd.exists(bmkPath.c_str())) {
+        sd.remove(bmkPath.c_str());
     }
-    if (InternalFS.exists(fullPath.c_str())) {
-        return InternalFS.remove(fullPath.c_str());
+    if (sd.exists(fullPath.c_str())) {
+        return sd.remove(fullPath.c_str());
     }
     return false;
 }
 
 uint32_t StorageManager::getUsedSpace() {
+    if (!beginSD()) return 0;
     uint32_t used = 0;
-    LfsFile dir = InternalFS.open(BOOK_DIR, FILE_O_READ);
-    if (!dir) return 0;
+    FsFile root = sd.open("/", O_RDONLY);
+    if (!root) return 0;
     
-    LfsFile file(InternalFS);
-    while ((file = dir.openNextFile())) {
-        String name = file.name();
-        if (name != "temp.txt" && !name.startsWith(".")) {
+    FsFile file;
+    while (file.openNext(&root, O_RDONLY)) {
+        char name[100];
+        file.getName(name, sizeof(name));
+        String filename = String(name);
+        if (filename != "temp.txt" && !filename.startsWith(".") && filename.endsWith(".txt")) {
             used += file.size();
         }
         file.close();
     }
-    dir.close();
+    root.close();
     return used;
 }
 
 bool StorageManager::writeProgress(const String& currentBook, uint32_t offset) {
-    if (InternalFS.exists(PROGRESS_FILE)) {
-        InternalFS.remove(PROGRESS_FILE);
+    if (!beginSD()) {
+        Serial.println("Failed to init SD card for writing progress.");
+        return false;
     }
 
-    LfsFile progressFile = InternalFS.open(PROGRESS_FILE, FILE_O_WRITE);
+    if (sd.exists(PROGRESS_FILE)) {
+        sd.remove(PROGRESS_FILE);
+    }
+
+    FsFile progressFile = sd.open(PROGRESS_FILE, O_WRONLY | O_CREAT | O_TRUNC);
     if (!progressFile) {
-        Serial.println("Failed to open progress file for writing.");
+        Serial.println("Failed to open progress file on SD for writing.");
         return false;
     }
     
@@ -186,13 +197,13 @@ bool StorageManager::writeProgress(const String& currentBook, uint32_t offset) {
 }
 
 bool StorageManager::readProgress(String& currentBook, uint32_t& offset) {
-    if (!InternalFS.exists(PROGRESS_FILE)) {
+    if (!beginSD() || !sd.exists(PROGRESS_FILE)) {
         currentBook = "";
         offset = 0;
         return false;
     }
 
-    LfsFile progressFile = InternalFS.open(PROGRESS_FILE, FILE_O_READ);
+    FsFile progressFile = sd.open(PROGRESS_FILE, O_RDONLY);
     if (!progressFile) {
         return false;
     }
@@ -209,14 +220,14 @@ bool StorageManager::readProgress(String& currentBook, uint32_t& offset) {
 }
 
 bool StorageManager::readProgress(String& currentBook, uint32_t& offset, uint32_t* historyDest, int maxHistoryLen, int& historyCount) {
-    if (!InternalFS.exists(PROGRESS_FILE)) {
+    if (!beginSD() || !sd.exists(PROGRESS_FILE)) {
         currentBook = "";
         offset = 0;
         historyCount = 0;
         return false;
     }
 
-    LfsFile progressFile = InternalFS.open(PROGRESS_FILE, FILE_O_READ);
+    FsFile progressFile = sd.open(PROGRESS_FILE, O_RDONLY);
     if (!progressFile) {
         historyCount = 0;
         return false;
@@ -263,12 +274,21 @@ static String getBookmarkFilename(const String& filename) {
 }
 
 bool StorageManager::writeBookmark(const String& filename, uint32_t offset) {
-    String path = String(BOOK_DIR) + "/" + getBookmarkFilename(filename) + ".bmk";
-    if (InternalFS.exists(path.c_str())) {
-        InternalFS.remove(path.c_str());
+    if (!beginSD()) {
+        return false;
+    }
+    if (!sd.exists("/bookmarks")) {
+        if (!sd.mkdir("/bookmarks")) {
+            Serial.println("Failed to create bookmarks directory on SD.");
+            return false;
+        }
+    }
+    String path = "/bookmarks/" + getBookmarkFilename(filename) + ".bmk";
+    if (sd.exists(path.c_str())) {
+        sd.remove(path.c_str());
     }
 
-    LfsFile progressFile = InternalFS.open(path.c_str(), FILE_O_WRITE);
+    FsFile progressFile = sd.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
     if (!progressFile) {
         Serial.println("Failed to open bookmark file for writing.");
         return false;
@@ -288,12 +308,13 @@ bool StorageManager::writeBookmark(const String& filename, uint32_t offset) {
 }
 
 bool StorageManager::readBookmark(const String& filename, uint32_t& offset) {
-    String path = String(BOOK_DIR) + "/" + getBookmarkFilename(filename) + ".bmk";
-    if (!InternalFS.exists(path.c_str())) {
+    if (!beginSD()) return false;
+    String path = "/bookmarks/" + getBookmarkFilename(filename) + ".bmk";
+    if (!sd.exists(path.c_str())) {
         offset = 0;
         return false;
     }
-    LfsFile progressFile = InternalFS.open(path.c_str(), FILE_O_READ);
+    FsFile progressFile = sd.open(path.c_str(), O_RDONLY);
     if (!progressFile) {
         return false;
     }
@@ -305,13 +326,18 @@ bool StorageManager::readBookmark(const String& filename, uint32_t& offset) {
 }
 
 bool StorageManager::readBookmark(const String& filename, uint32_t& offset, uint32_t* historyDest, int maxHistoryLen, int& historyCount) {
-    String path = String(BOOK_DIR) + "/" + getBookmarkFilename(filename) + ".bmk";
-    if (!InternalFS.exists(path.c_str())) {
+    if (!beginSD()) {
         offset = 0;
         historyCount = 0;
         return false;
     }
-    LfsFile progressFile = InternalFS.open(path.c_str(), FILE_O_READ);
+    String path = "/bookmarks/" + getBookmarkFilename(filename) + ".bmk";
+    if (!sd.exists(path.c_str())) {
+        offset = 0;
+        historyCount = 0;
+        return false;
+    }
+    FsFile progressFile = sd.open(path.c_str(), O_RDONLY);
     if (!progressFile) {
         historyCount = 0;
         return false;
@@ -350,42 +376,39 @@ Adafruit_LittleFS_Namespace::File StorageManager::openBook(const String& filenam
 }
 
 bool StorageManager::startNewBookWrite() {
-    if (_isUploading && _uploadFile != nullptr) {
-        _uploadFile->close();
-        delete _uploadFile;
-        _uploadFile = nullptr;
+    if (!beginSD()) {
+        return false;
+    }
+
+    if (_isUploading && _uploadFile) {
+        _uploadFile.close();
     }
     
     // Always write to temp.txt first to ensure atomic updates
-    String tempPath = String(BOOK_DIR) + "/temp.txt";
-    if (InternalFS.exists(tempPath.c_str())) {
-        InternalFS.remove(tempPath.c_str());
+    if (sd.exists("/temp.txt")) {
+        sd.remove("/temp.txt");
     }
 
-    // Dynamically allocate File with InternalFS reference
-    _uploadFile = new Adafruit_LittleFS_Namespace::File(InternalFS);
-    *_uploadFile = InternalFS.open(tempPath.c_str(), FILE_O_WRITE);
-    if (!(*_uploadFile)) {
-        Serial.println("Failed to open temp.txt for writing BLE stream.");
-        delete _uploadFile;
-        _uploadFile = nullptr;
+    _uploadFile = sd.open("/temp.txt", O_WRONLY | O_CREAT | O_TRUNC);
+    if (!_uploadFile) {
+        Serial.println("Failed to open temp.txt on SD for writing BLE stream.");
         _isUploading = false;
         return false;
     }
 
     _isUploading = true;
-    Serial.println("Started writing to temp.txt...");
+    Serial.println("Started writing to temp.txt on SD...");
     return true;
 }
 
 bool StorageManager::writeBookChunk(const uint8_t* data, size_t len) {
-    if (!_isUploading || _uploadFile == nullptr || !(*_uploadFile)) {
+    if (!_isUploading || !_uploadFile) {
         Serial.println("[Device Debug] writeBookChunk: Not uploading or file not open.");
         return false;
     }
-    size_t written = _uploadFile->write(data, len);
+    size_t written = _uploadFile.write(data, len);
     if (written != len) {
-        Serial.print("[Device Debug] writeBookChunk: Flash write failed! Expected ");
+        Serial.print("[Device Debug] writeBookChunk: SD write failed! Expected ");
         Serial.print(len);
         Serial.print(" bytes, wrote ");
         Serial.println(written);
@@ -395,28 +418,23 @@ bool StorageManager::writeBookChunk(const uint8_t* data, size_t len) {
 }
 
 bool StorageManager::finalizeBookWrite(const String& title) {
-    if (!_isUploading || _uploadFile == nullptr) {
-        Serial.println("[Device Debug] finalizeBookWrite: Not uploading or file pointer null.");
+    if (!_isUploading || !_uploadFile) {
+        Serial.println("[Device Debug] finalizeBookWrite: Not uploading or file not open.");
         return false;
     }
-    _uploadFile->close();
-    delete _uploadFile;
-    _uploadFile = nullptr;
+    _uploadFile.close();
     _isUploading = false;
 
-    String tempPath = String(BOOK_DIR) + "/temp.txt";
     uint32_t tempSize = 0;
-
-    // Check temp.txt size
-    LfsFile tempFile = InternalFS.open(tempPath.c_str(), FILE_O_READ);
+    FsFile tempFile = sd.open("/temp.txt", O_RDONLY);
     if (tempFile) {
         tempSize = tempFile.size();
-        Serial.print("[Device Debug] temp.txt size: ");
+        Serial.print("[Device Debug] temp.txt size on SD: ");
         Serial.print(tempSize);
         Serial.println(" bytes.");
         tempFile.close();
     } else {
-        Serial.println("[Device Debug] Warning: Failed to open temp.txt to check size.");
+        Serial.println("[Device Debug] Warning: Failed to open temp.txt on SD to check size.");
     }
 
     // Open temp.txt, extract the first line as book title if title is empty
@@ -424,7 +442,7 @@ bool StorageManager::finalizeBookWrite(const String& title) {
     finalTitle.trim();
 
     if (finalTitle.length() == 0) {
-        tempFile = InternalFS.open(tempPath.c_str(), FILE_O_READ);
+        tempFile = sd.open("/temp.txt", O_RDONLY);
         if (tempFile) {
             finalTitle = tempFile.readStringUntil('\n');
             finalTitle.trim();
@@ -454,10 +472,10 @@ bool StorageManager::finalizeBookWrite(const String& title) {
     // Add extension
     cleanTitle += ".txt";
 
-    String finalPath = String(BOOK_DIR) + "/" + cleanTitle;
+    String finalPath = "/" + cleanTitle;
 
-    if (InternalFS.exists(finalPath.c_str())) {
-        InternalFS.remove(finalPath.c_str());
+    if (sd.exists(finalPath.c_str())) {
+        sd.remove(finalPath.c_str());
     }
 
     Serial.print("Renaming temp.txt to: ");
@@ -467,8 +485,8 @@ bool StorageManager::finalizeBookWrite(const String& title) {
         Serial.println("[Device Debug] Warning: Attempting to rename an empty 0-byte file!");
     }
 
-    if (!InternalFS.rename(tempPath.c_str(), finalPath.c_str())) {
-        Serial.println("Rename failed!");
+    if (!sd.rename("/temp.txt", finalPath.c_str())) {
+        Serial.println("Rename failed on SD!");
         return false;
     }
 
@@ -476,15 +494,12 @@ bool StorageManager::finalizeBookWrite(const String& title) {
 }
 
 bool StorageManager::clearStorage() {
-    if (_isUploading && _uploadFile != nullptr) {
-        _uploadFile->close();
-        delete _uploadFile;
-        _uploadFile = nullptr;
+    if (_isUploading && _uploadFile) {
+        _uploadFile.close();
         _isUploading = false;
     }
     
-    Serial.println("[Device Debug] Formatting filesystem...");
-    // Format entire flash filesystem to apply the new partition size (320KB) and clear any corruption
+    Serial.println("[Device Debug] Formatting InternalFS...");
     InternalFS.end();
     if (!InternalFS.format()) {
         Serial.println("Format failed!");
@@ -494,8 +509,32 @@ bool StorageManager::clearStorage() {
         Serial.println("Re-mount failed!");
         return false;
     }
-    Serial.println("[Device Debug] Filesystem formatted successfully with 320KB layout.");
-    return createBookDir();
+    createBookDir();
+
+    Serial.println("[Device Debug] Formatting progress/bookmarks on SD...");
+    if (beginSD()) {
+        if (sd.exists(PROGRESS_FILE)) {
+            sd.remove(PROGRESS_FILE);
+        }
+        if (sd.exists("/bookmarks")) {
+            // Delete all files in /bookmarks
+            FsFile bmkDir = sd.open("/bookmarks", O_RDONLY);
+            if (bmkDir && bmkDir.isDir()) {
+                FsFile file;
+                while (file.openNext(&bmkDir, O_RDONLY)) {
+                    char name[100];
+                    file.getName(name, sizeof(name));
+                    file.close();
+                    String filePath = "/bookmarks/" + String(name);
+                    sd.remove(filePath.c_str());
+                }
+                bmkDir.close();
+                sd.rmdir("/bookmarks");
+            }
+        }
+    }
+    Serial.println("[Device Debug] Storage cleared successfully.");
+    return true;
 }
 
 bool StorageManager::recoverSDSoftware() {
@@ -769,6 +808,11 @@ bool StorageManager::beginSD() {
 
     Serial.println("[SD Debug] SD Card hard failure: could not initialize even after power cycle.");
     return false;
+}
+
+bool StorageManager::sdExists(const String& path) {
+    if (!beginSD()) return false;
+    return sd.exists(path.c_str());
 }
 
 int StorageManager::listSDBooks(String books[], int maxBooks) {
