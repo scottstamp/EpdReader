@@ -98,6 +98,9 @@ public:
     void loadSettings();
     void saveSettings();
 
+    int getBatteryPercent();
+    void drawBattery(Adafruit_GFX& display);
+
     bool isWakeupFromSleep() const { return _isWakeupFromSleep; }
     void checkAndTriggerPreFetch(const String& filename);
 
@@ -154,6 +157,11 @@ private:
 
     void cachePageText(const String& filename, uint32_t startOffset);
     void clearPageCache();
+
+    // Battery measurement rolling average history
+    int _batteryHistory[5];
+    int _batteryHistoryIndex;
+    bool _batteryHistoryInitialized;
 };
 
 #endif // DISPLAY_MANAGER_H

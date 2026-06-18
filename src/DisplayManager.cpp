@@ -11,6 +11,7 @@
 #include "Literata12pt7b.h"
 #include "Literata18pt7b.h"
 #include "AmazonEmber_Medium9pt7b.h"
+#include "AmazonEmber_Medium12pt7b.h"
 #include "AtkinsonHyperlegibleNext9pt7b.h"
 #include "AtkinsonHyperlegibleNext12pt7b.h"
 #include "AtkinsonHyperlegibleNext18pt7b.h"
@@ -88,7 +89,7 @@ DisplayManager &DisplayManager::getInstance() {
 }
 
 DisplayManager::DisplayManager()
-    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false), _currentChapterTitle(""), _currentChapterSize(0) {
+    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false), _currentChapterTitle(""), _currentChapterSize(0), _batteryHistoryIndex(0), _batteryHistoryInitialized(false) {
   clearHistory();
 }
 
@@ -401,7 +402,8 @@ uint32_t DisplayManager::drawPageText(const String &filename,
 
   if (copyLen <= 0) {
     if (performRender) {
-      epd.setFont(&AtkinsonHyperlegibleNext9pt7b);
+      // epd.setFont(&AtkinsonHyperlegibleNext9pt7b);
+      epd.setFont(&Bookerly12pt7b);
       epd.setTextColor(GxEPD_BLACK);
       epd.setCursor(10, 45);
       epd.print("End of book reached.");
@@ -412,7 +414,7 @@ uint32_t DisplayManager::drawPageText(const String &filename,
 
   preprocessUtf8(buffer, copyLen);
 
-  const GFXfont *selectedFont = &AtkinsonHyperlegibleNext9pt7b;
+  const GFXfont *selectedFont = &Bookerly12pt7b;
 
   if (_fontType == FONT_SANS || _fontType == FONT_MONO || _fontType == FONT_ATKINSON) {
     if (_fontSize == SIZE_SMALL) {
@@ -600,10 +602,11 @@ void MenuView::render(Adafruit_GFX& display) {
 
   // Header
   display.setTextColor(GxEPD_BLACK);
-  display.setFont(&AmazonEmber_Medium9pt7b);
+  display.setFont(&AmazonEmber_Medium12pt7b);
   display.setCursor(10, 15);
   display.print(_header.c_str());
-  display.drawFastHLine(0, 22, display.width(), GxEPD_BLACK);
+  DisplayManager::getInstance().drawBattery(display);
+  display.drawFastHLine(0, 23, display.width(), GxEPD_BLACK);
 
   // Render Options within viewport
   int startY = 42;
@@ -643,11 +646,13 @@ MessageView::MessageView(const String& title, const String& msg, bool isAlert)
 
 void MessageView::render(Adafruit_GFX& display) {
   // Header
-  display.setTextColor(_isAlert ? GxEPD_RED : GxEPD_BLACK);
-  display.setFont(&AmazonEmber_Medium9pt7b);
+  // display.setTextColor(_isAlert ? GxEPD_RED : GxEPD_BLACK); // no red available on this new display
+  display.setTextColor(GxEPD_BLACK);
+  display.setFont(&AmazonEmber_Medium12pt7b);
   display.setCursor(10, 15);
   display.print(_title.c_str());
-  display.drawFastHLine(0, 22, display.width(), GxEPD_BLACK);
+  DisplayManager::getInstance().drawBattery(display);
+  display.drawFastHLine(0, 23, display.width(), GxEPD_BLACK);
 
   // Message body
   display.setTextColor(GxEPD_BLACK);
@@ -662,8 +667,8 @@ void MessageView::render(Adafruit_GFX& display) {
       y += 19;
     } else {
       int advance = 8;
-      if (c >= AmazonEmber_Medium9pt7b.first && c <= AmazonEmber_Medium9pt7b.last) {
-        advance = AmazonEmber_Medium9pt7b.glyph[c - AmazonEmber_Medium9pt7b.first].xAdvance;
+      if (c >= AmazonEmber_Medium12pt7b.first && c <= AmazonEmber_Medium12pt7b.last) {
+        advance = AmazonEmber_Medium12pt7b.glyph[c - AmazonEmber_Medium12pt7b.first].xAdvance;
       }
       if (x + advance > display.width() - 16) {
         x = 10;
@@ -683,10 +688,11 @@ ProgressView::ProgressView(const String& task, int percentage)
 void ProgressView::render(Adafruit_GFX& display) {
   // Header
   display.setTextColor(GxEPD_BLACK);
-  display.setFont(&AmazonEmber_Medium9pt7b);
+  display.setFont(&AmazonEmber_Medium12pt7b);
   display.setCursor(10, 15);
   display.print("BLE File Upload");
-  display.drawFastHLine(0, 22, display.width(), GxEPD_BLACK);
+  DisplayManager::getInstance().drawBattery(display);
+  display.drawFastHLine(0, 23, display.width(), GxEPD_BLACK);
 
   // Task name
   display.setCursor(15, 50);
@@ -860,4 +866,68 @@ void DisplayManager::checkAndTriggerPreFetch(const String& filename) {
   }
 }
 
+extern "C" uint32_t analogReadVDDHDIV5(void);
 
+int DisplayManager::getBatteryPercent() {
+#ifdef SAADC_CH_PSELP_PSELP_VDDHDIV5
+  float vbat = (analogReadVDDHDIV5() * 3.0f / 1024.0f) * 5.0f;
+#else
+  float vbat = (analogRead(PIN_BATTERY) * 3.3f / 1024.0f) * BATTERY_DIVIDER;
+#endif
+  int batPercent = map(vbat * 100, 330, 420, 0, 100);
+  batPercent = constrain(batPercent, 0, 100);
+
+  if (!_batteryHistoryInitialized) {
+    for (int i = 0; i < 5; i++) {
+      _batteryHistory[i] = batPercent;
+    }
+    _batteryHistoryInitialized = true;
+    _batteryHistoryIndex = 0;
+  } else {
+    _batteryHistory[_batteryHistoryIndex] = batPercent;
+    _batteryHistoryIndex = (_batteryHistoryIndex + 1) % 5;
+  }
+
+  int sum = 0;
+  for (int i = 0; i < 5; i++) {
+    sum += _batteryHistory[i];
+  }
+  return sum / 5;
+}
+
+void DisplayManager::drawBattery(Adafruit_GFX& display) {
+  int percent = getBatteryPercent();
+  
+  String pctStr = String(percent) + "%";
+  
+  // Position battery gauge icon on the far right
+  int batteryWidth = 20;
+  int batteryHeight = 10;
+  int batteryX = display.width() - batteryWidth - 10;
+  int batteryY = 6;
+  
+  // Draw battery body outline
+  display.drawRect(batteryX, batteryY, batteryWidth, batteryHeight, GxEPD_BLACK);
+  
+  // Draw battery tip
+  display.fillRect(batteryX + batteryWidth, batteryY + 3, 2, 4, GxEPD_BLACK);
+  
+  // Draw battery charge fill
+  int fillWidth = map(percent, 0, 100, 0, batteryWidth - 4);
+  if (fillWidth > 0) {
+    display.fillRect(batteryX + 2, batteryY + 2, fillWidth, batteryHeight - 4, GxEPD_BLACK);
+  }
+  
+  // Draw percentage text next to it (to the left)
+  int textX = batteryX - 5 - (percent >= 100 ? 36 : (percent >= 10 ? 28 : 20));
+
+  display.setTextColor(GxEPD_BLACK);
+  display.setFont(&AmazonEmber_Medium9pt7b);
+  display.setCursor(textX, batteryY + 9);
+  display.print(pctStr.c_str());
+
+  // broken ignore this
+  // Use grayscale renderer for battery % text; use _isFullRefresh for antialiasing mode
+  // drawGrayscaleString(display, textX, batteryY + 9, pctStr.c_str(),
+                      // &AmazonEmber_Medium9pt7b, _isFullRefresh);
+}
