@@ -8,3 +8,4 @@ epd-driver-fork/GxEPD2/examples
 .venv310
 books
 scratch
+__pycache__
