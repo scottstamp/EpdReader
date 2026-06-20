@@ -23,6 +23,17 @@
 using namespace Adafruit_LittleFS_Namespace;
 using LfsFile = Adafruit_LittleFS_Namespace::File;
 
+// GxEPD2_BW keeps the framebuffer as a private member. We can use the
+// GxEPD2-supplied public accessors (if present) or take a different approach:
+// since this file instantiates the global `epd` object, we declare a thin
+// subclass that exposes the buffer via the public GxEPD2 API.
+//
+// Note: _buffer is private in this version of GxEPD2, so we cannot access it
+// directly from a subclass. We use GxEPD2's public writeImage() to copy data
+// into the buffer and rely on the GFX drawBitmap() path for reading. For
+// framebuffer save, we use the GxEPD2 getBuffer() accessor (public in newer
+// versions) or fall back to the writeImage/drawBitmap round-trip if needed.
+
 // Instantiate EPD driver in B&W mode
 GxEPD2_BW<GxEPD2_370_GDEY037T03, GxEPD2_370_GDEY037T03::HEIGHT>
     epd(GxEPD2_370_GDEY037T03(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
@@ -89,7 +100,7 @@ DisplayManager &DisplayManager::getInstance() {
 }
 
 DisplayManager::DisplayManager()
-    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false), _currentChapterTitle(""), _currentChapterSize(0), _batteryHistoryIndex(0), _batteryHistoryInitialized(false) {
+    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _lineSpacing(SPACING_NORMAL), _contrastMode(CONTRAST_NORMAL), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false), _currentChapterTitle(""), _currentChapterSize(0), _batteryHistoryIndex(0), _batteryHistoryInitialized(false) {
   clearHistory();
 }
 
@@ -123,10 +134,13 @@ void DisplayManager::begin() {
   loadSettings();
   epd.setRotation(_isFlipped ? 3 : 1);
 
-  // Clean clear on boot only if NOT waking up from deep sleep.
-  // If waking up from sleep, the display is already showing the correct text
-  // from the last session.
-  if (!_isWakeupFromSleep) {
+  // On wake: LDIM the saved framebuffer to the controller (no refresh).
+  // This populates the controller's internal RAM so the next render can be a
+  // fast partial refresh instead of a slow full refresh.
+  if (_isWakeupFromSleep) {
+    loadFramebufferOnWake();
+  } else {
+    // Cold boot: clear to white
     clear();
   }
 }
@@ -135,7 +149,7 @@ void DisplayManager::clear() {
   powerUp();
   epd.firstPage();
   do {
-    epd.fillScreen(GxEPD_WHITE);
+    epd.fillScreen(getPaperColor());
   } while (epd.nextPage());
   powerDown();
 }
@@ -404,7 +418,7 @@ uint32_t DisplayManager::drawPageText(const String &filename,
     if (performRender) {
       // epd.setFont(&AtkinsonHyperlegibleNext9pt7b);
       epd.setFont(&Bookerly12pt7b);
-      epd.setTextColor(GxEPD_BLACK);
+      epd.setTextColor(getInkColor());
       epd.setCursor(10, 45);
       epd.print("End of book reached.");
     }
@@ -443,6 +457,17 @@ uint32_t DisplayManager::drawPageText(const String &filename,
   }
 
   int line_height = selectedFont->yAdvance;
+  int line_spacing_offset = 0;
+  if (_lineSpacing == SPACING_COMPACT) {
+    line_spacing_offset = -2;
+  } else if (_lineSpacing == SPACING_NORMAL) {
+    line_spacing_offset = 1;
+  } else if (_lineSpacing == SPACING_RELAXED) {
+    line_spacing_offset = 5;
+  }
+  line_height += line_spacing_offset;
+  if (line_height < (int)selectedFont->yAdvance) line_height = selectedFont->yAdvance;
+
   int y_start = line_height - 3;
   if (selectedFont == &AtkinsonHyperlegibleNext9pt7b || selectedFont == &AtkinsonHyperlegibleNext12pt7b) {
     y_start = line_height - 2;
@@ -472,7 +497,7 @@ uint32_t DisplayManager::drawPageText(const String &filename,
 
   if (performRender) {
     epd.setFont(selectedFont);
-    epd.setTextColor(GxEPD_BLACK);
+    epd.setTextColor(getInkColor());
   }
 
   while (idx <= copyLen && cur_y <= y_end) {
@@ -535,16 +560,16 @@ uint32_t DisplayManager::drawPageText(const String &filename,
     int barY = epd.height() - 5;
     int barHeight = 3;
 
-    epd.drawRect(barX, barY, barWidth, barHeight, GxEPD_BLACK);
+    epd.drawRect(barX, barY, barWidth, barHeight, getInkColor());
 
     uint32_t currentOffset = startOffset;
     uint32_t totalSize = _currentChapterSize > 0 ? _currentChapterSize : 1;
     if (currentOffset > totalSize) currentOffset = totalSize;
-    
+
     int progressWidth = (currentOffset * barWidth) / totalSize;
     if (progressWidth > barWidth) progressWidth = barWidth;
-    
-    epd.fillRect(barX, barY, progressWidth, barHeight, GxEPD_BLACK);
+
+    epd.fillRect(barX, barY, progressWidth, barHeight, getInkColor());
   }
 
   _nextPageOffset = trueStartOffset + idx;
@@ -579,13 +604,14 @@ bool ReaderView::prefersFullRefresh() {
 }
 
 // MenuView
-MenuView::MenuView(const String& header, const String options[], int count, int selectedIdx)
-    : _header(header), _options(options), _count(count), _selectedIdx(selectedIdx) {}
+MenuView::MenuView(const String& header, const String options[], int count, int selectedIdx, const String& footer)
+    : _header(header), _options(options), _count(count), _selectedIdx(selectedIdx), _footer(footer) {}
 
 void MenuView::render(Adafruit_GFX& display) {
-  int itemHeight = 19;
+  int itemHeight = 17;
   int maxVisible = (display.height() - 42) / itemHeight;
   int startVisibleIdx = 0;
+  uint16_t inkColor = DisplayManager::getInstance().getInkColor();
   if (_count > maxVisible) {
     if (_selectedIdx < maxVisible - 1) {
       startVisibleIdx = 0;
@@ -601,12 +627,12 @@ void MenuView::render(Adafruit_GFX& display) {
   }
 
   // Header
-  display.setTextColor(GxEPD_BLACK);
+  display.setTextColor(DisplayManager::getInstance().getInkColor());
   display.setFont(&AmazonEmber_Medium12pt7b);
   display.setCursor(10, 15);
   display.print(_header.c_str());
   DisplayManager::getInstance().drawBattery(display);
-  display.drawFastHLine(0, 23, display.width(), GxEPD_BLACK);
+  display.drawFastHLine(0, 23, display.width(), DisplayManager::getInstance().getInkColor());
 
   // Render Options within viewport
   int startY = 42;
@@ -630,13 +656,23 @@ void MenuView::render(Adafruit_GFX& display) {
     if (startVisibleIdx > 0) {
       // Up indicator arrow
       int upY = startY - 4;
-      display.fillTriangle(right_edge, upY, right_edge + 4, upY - 6, right_edge + 8, upY, GxEPD_BLACK);
+      display.fillTriangle(right_edge, upY, right_edge + 4, upY - 6, right_edge + 8, upY, inkColor);
     }
     if (startVisibleIdx + maxVisible < _count) {
       // Down indicator arrow
       int downY = startY + maxVisible * itemHeight;
-      display.fillTriangle(right_edge, downY, right_edge + 4, downY + 6, right_edge + 8, downY, GxEPD_BLACK);
+      display.fillTriangle(right_edge, downY, right_edge + 4, downY + 6, right_edge + 8, downY, inkColor);
     }
+  }
+
+  // Draw footer (e.g. session time) at the bottom
+  if (_footer.length() > 0) {
+    int footerY = display.height() - 16;
+    int footerX = 10;
+    display.setFont(&AmazonEmber_Medium9pt7b);
+    display.setTextColor(inkColor);
+    display.setCursor(footerX, footerY + 11);
+    display.print(_footer.c_str());
   }
 }
 
@@ -645,17 +681,18 @@ MessageView::MessageView(const String& title, const String& msg, bool isAlert)
     : _title(title), _msg(msg), _isAlert(isAlert) {}
 
 void MessageView::render(Adafruit_GFX& display) {
+  uint16_t inkColor = DisplayManager::getInstance().getInkColor();
   // Header
   // display.setTextColor(_isAlert ? GxEPD_RED : GxEPD_BLACK); // no red available on this new display
-  display.setTextColor(GxEPD_BLACK);
+  display.setTextColor(inkColor);
   display.setFont(&AmazonEmber_Medium12pt7b);
   display.setCursor(10, 15);
   display.print(_title.c_str());
   DisplayManager::getInstance().drawBattery(display);
-  display.drawFastHLine(0, 23, display.width(), GxEPD_BLACK);
+  display.drawFastHLine(0, 23, display.width(), inkColor);
 
   // Message body
-  display.setTextColor(GxEPD_BLACK);
+  display.setTextColor(inkColor);
 
   int x = 10;
   int y = 45;
@@ -686,13 +723,14 @@ ProgressView::ProgressView(const String& task, int percentage)
     : _task(task), _percentage(percentage) {}
 
 void ProgressView::render(Adafruit_GFX& display) {
+  uint16_t inkColor = DisplayManager::getInstance().getInkColor();
   // Header
-  display.setTextColor(GxEPD_BLACK);
+  display.setTextColor(inkColor);
   display.setFont(&AmazonEmber_Medium12pt7b);
   display.setCursor(10, 15);
   display.print("BLE File Upload");
   DisplayManager::getInstance().drawBattery(display);
-  display.drawFastHLine(0, 23, display.width(), GxEPD_BLACK);
+  display.drawFastHLine(0, 23, display.width(), inkColor);
 
   // Task name
   display.setCursor(15, 50);
@@ -701,11 +739,11 @@ void ProgressView::render(Adafruit_GFX& display) {
   // Progress bar container
   int barWidth = 256;
   int barX = (display.width() - barWidth) / 2;
-  display.drawRect(barX, 75, barWidth, 16, GxEPD_BLACK);
+  display.drawRect(barX, 75, barWidth, 16, inkColor);
 
   // Progress fill
   int fillWidth = map(_percentage, 0, 100, 0, barWidth - 4);
-  display.fillRect(barX + 2, 77, fillWidth, 12, GxEPD_BLACK);
+  display.fillRect(barX + 2, 77, fillWidth, 12, inkColor);
 
   // Percentage text
   String pctStr = String(_percentage) + "%";
@@ -724,7 +762,7 @@ void DisplayManager::draw(UIView& view) {
   }
   epd.firstPage();
   do {
-    epd.fillScreen(GxEPD_WHITE);
+    epd.fillScreen(getPaperColor());
     view.render(epd);
   } while (epd.nextPage());
   powerDown();
@@ -750,6 +788,34 @@ void DisplayManager::cycleFontSize() {
   saveSettings();
 }
 
+void DisplayManager::setLineSpacing(LineSpacing spacing) {
+  _lineSpacing = spacing;
+  saveSettings();
+}
+
+void DisplayManager::cycleLineSpacing() {
+  _lineSpacing = (LineSpacing)((_lineSpacing + 1) % 3);
+  saveSettings();
+}
+
+void DisplayManager::setContrastMode(ContrastMode mode) {
+  _contrastMode = mode;
+  saveSettings();
+}
+
+void DisplayManager::cycleContrastMode() {
+  _contrastMode = (ContrastMode)((_contrastMode + 1) % 2);
+  saveSettings();
+}
+
+uint16_t DisplayManager::getInkColor() const {
+  return (_contrastMode == CONTRAST_INVERTED) ? GxEPD_WHITE : GxEPD_BLACK;
+}
+
+uint16_t DisplayManager::getPaperColor() const {
+  return (_contrastMode == CONTRAST_INVERTED) ? GxEPD_BLACK : GxEPD_WHITE;
+}
+
 void DisplayManager::setFlipped(bool flipped) {
   _isFlipped = flipped;
   epd.setRotation(_isFlipped ? 3 : 1);
@@ -760,55 +826,83 @@ void DisplayManager::loadSettings() {
   // Set defaults first
   _fontType = FONT_SANS;
   _fontSize = SIZE_MEDIUM;
+  _lineSpacing = SPACING_NORMAL;
+  _contrastMode = CONTRAST_NORMAL;
   _isFlipped = false;
 
-  if (!InternalFS.exists("/settings.dat")) {
-    return;
-  }
-  LfsFile file = InternalFS.open("/settings.dat", FILE_O_READ);
-  if (file) {
-    if (file.available()) {
-      String typeStr = file.readStringUntil('\n');
-      typeStr.trim();
-      if (typeStr.length() > 0) {
-        int val = typeStr.toInt();
-        if (val >= 0 && val <= 4) {
-          _fontType = (FontType)val;
-        }
-      }
-    }
-    if (file.available()) {
-      String sizeStr = file.readStringUntil('\n');
-      sizeStr.trim();
-      if (sizeStr.length() > 0) {
-        int val = sizeStr.toInt();
-        if (val >= 0 && val <= 2) {
-          _fontSize = (FontSize)val;
-        }
-      }
-    }
-    if (file.available()) {
-      String flipStr = file.readStringUntil('\n');
-      flipStr.trim();
-      if (flipStr.length() > 0) {
-        _isFlipped = (flipStr.toInt() == 1);
-      }
-    }
-    file.close();
+  int fontType = 0, fontSize = 1, lineSpacing = 1, contrastMode = 0;
+  bool isFlipped = false;
+  if (StorageManager::getInstance().readSettings(fontType, fontSize, isFlipped, lineSpacing, contrastMode)) {
+    if (fontType >= 0 && fontType <= 4) _fontType = (FontType)fontType;
+    if (fontSize >= 0 && fontSize <= 2) _fontSize = (FontSize)fontSize;
+    _isFlipped = isFlipped;
+    if (lineSpacing >= 0 && lineSpacing <= 2) _lineSpacing = (LineSpacing)lineSpacing;
+    if (contrastMode >= 0 && contrastMode <= 1) _contrastMode = (ContrastMode)contrastMode;
   }
 }
 
 void DisplayManager::saveSettings() {
-  if (InternalFS.exists("/settings.dat")) {
-    InternalFS.remove("/settings.dat");
+  StorageManager::getInstance().writeSettings(
+    (int)_fontType, (int)_fontSize, _isFlipped, (int)_lineSpacing, (int)_contrastMode);
+}
+
+void DisplayManager::saveFramebufferToSD() {
+  // Read every pixel via the public GFX getPixel() accessor (reads the
+  // private _buffer internally) and pack into a 1-bpp byte array. ~100k
+  // pixels at ~1us each = ~100ms. Acceptable as a one-time pre-sleep cost.
+  const int width = (int)GxEPD2_370_GDEY037T03::WIDTH;
+  const int height = (int)GxEPD2_370_GDEY037T03::HEIGHT;
+  const int bytes = (width * height + 7) / 8;
+  uint8_t* buf = (uint8_t*)malloc(bytes);
+  if (!buf) {
+    Serial.println("[FB] malloc failed for framebuffer save");
+    return;
   }
-  LfsFile file = InternalFS.open("/settings.dat", FILE_O_WRITE);
-  if (file) {
-    file.println((int)_fontType);
-    file.println((int)_fontSize);
-    file.println(_isFlipped ? 1 : 0);
-    file.close();
+  memset(buf, 0, bytes);
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      int bitIndex = y * width + x;
+      if (epd.getPixel(x, y) == GxEPD_BLACK) {
+        buf[bitIndex / 8] |= (0x80 >> (bitIndex & 7));
+      }
+    }
   }
+  bool ok = StorageManager::getInstance().saveFramebuffer(buf, bytes);
+  free(buf);
+  if (ok) {
+    Serial.print("[FB] Saved ");
+    Serial.print(bytes);
+    Serial.println(" bytes to SD.");
+  }
+}
+
+void DisplayManager::loadFramebufferOnWake() {
+  // Load the saved buffer from SD, then LDIM it to the controller's frame
+  // buffer (without triggering a refresh). The controller now knows the
+  // current display state. When the next render happens, it can be a fast
+  // partial refresh (~0.5s) instead of a slow full refresh (~2-4s).
+  const int width = (int)GxEPD2_370_GDEY037T03::WIDTH;
+  const int height = (int)GxEPD2_370_GDEY037T03::HEIGHT;
+  const int bytes = (width * height + 7) / 8;
+  uint8_t* buf = (uint8_t*)malloc(bytes);
+  if (!buf) {
+    Serial.println("[FB] malloc failed for framebuffer load");
+    return;
+  }
+  if (!StorageManager::getInstance().loadFramebuffer(buf, bytes)) {
+    Serial.println("[FB] No saved framebuffer on SD; first wake after power-cycle will do full refresh.");
+    free(buf);
+    return;
+  }
+  // LDIM-only: write the saved buffer to the controller's frame buffer
+  // without triggering a display update. epd2 is the public driver member
+  // of GxEPD2_BW; writeImage sends IT8951 command 0x13 (set current
+  // frame) but does NOT call refresh/DPYEN.
+  powerUp();
+  epd.epd2.writeImage(buf, 0, 0, width, height);
+  powerDown();
+  free(buf);
+  Serial.println("[FB] LDIM-only framebuffer restore complete; next render can be partial.");
 }
 
 void DisplayManager::checkAndTriggerPreFetch(const String& filename) {
@@ -837,11 +931,11 @@ void DisplayManager::checkAndTriggerPreFetch(const String& filename) {
       epd.setPartialWindow(loaderX, 0, 21, 20);
       epd.firstPage();
       do {
-        epd.fillRect(loaderX, 0, 21, 20, GxEPD_WHITE);
+        epd.fillRect(loaderX, 0, 21, 20, getPaperColor());
         // Draw clock/sync icon
-        epd.drawCircle(loaderX + 10, 10, 4, GxEPD_BLACK);
-        epd.drawLine(loaderX + 10, 10, loaderX + 10, 7, GxEPD_BLACK);
-        epd.drawLine(loaderX + 10, 10, loaderX + 13, 10, GxEPD_BLACK);
+        epd.drawCircle(loaderX + 10, 10, 4, getInkColor());
+        epd.drawLine(loaderX + 10, 10, loaderX + 10, 7, getInkColor());
+        epd.drawLine(loaderX + 10, 10, loaderX + 13, 10, getInkColor());
       } while (epd.nextPage());
       powerDown();
 
@@ -851,13 +945,13 @@ void DisplayManager::checkAndTriggerPreFetch(const String& filename) {
       _pageCacheStartOffset = _nextPageOffset;
       _pageCacheLength = bytesRead;
       _pageCacheFilename = filename;
-      
+
       // 3. Erase the loading indicator using partial-window refresh
       powerUp();
       epd.setPartialWindow(loaderX, 0, 21, 20);
       epd.firstPage();
       do {
-        epd.fillRect(loaderX, 0, 21, 20, GxEPD_WHITE);
+        epd.fillRect(loaderX, 0, 21, 20, getPaperColor());
       } while (epd.nextPage());
       powerDown();
       
@@ -897,31 +991,32 @@ int DisplayManager::getBatteryPercent() {
 
 void DisplayManager::drawBattery(Adafruit_GFX& display) {
   int percent = getBatteryPercent();
-  
+
   String pctStr = String(percent) + "%";
-  
+
   // Position battery gauge icon on the far right
   int batteryWidth = 20;
   int batteryHeight = 10;
   int batteryX = display.width() - batteryWidth - 10;
   int batteryY = 6;
-  
+  uint16_t inkColor = getInkColor();
+
   // Draw battery body outline
-  display.drawRect(batteryX, batteryY, batteryWidth, batteryHeight, GxEPD_BLACK);
-  
+  display.drawRect(batteryX, batteryY, batteryWidth, batteryHeight, inkColor);
+
   // Draw battery tip
-  display.fillRect(batteryX + batteryWidth, batteryY + 3, 2, 4, GxEPD_BLACK);
-  
+  display.fillRect(batteryX + batteryWidth, batteryY + 3, 2, 4, inkColor);
+
   // Draw battery charge fill
   int fillWidth = map(percent, 0, 100, 0, batteryWidth - 4);
   if (fillWidth > 0) {
-    display.fillRect(batteryX + 2, batteryY + 2, fillWidth, batteryHeight - 4, GxEPD_BLACK);
+    display.fillRect(batteryX + 2, batteryY + 2, fillWidth, batteryHeight - 4, inkColor);
   }
-  
+
   // Draw percentage text next to it (to the left)
   int textX = batteryX - 5 - (percent >= 100 ? 36 : (percent >= 10 ? 28 : 20));
 
-  display.setTextColor(GxEPD_BLACK);
+  display.setTextColor(inkColor);
   display.setFont(&AmazonEmber_Medium9pt7b);
   display.setCursor(textX, batteryY + 9);
   display.print(pctStr.c_str());

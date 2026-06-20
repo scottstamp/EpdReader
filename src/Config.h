@@ -53,6 +53,13 @@
 
 // --- System Auto-Sleep Timeout ---
 #define AUTO_SLEEP_MS                                                          \
-  120000 // 2 minutes of inactivity before deep sleep (system-off/light-sleep)
+  15000 // 15 seconds of inactivity before deep sleep (system-off/light-sleep)
+  // 120000 // 2 minutes of inactivity before deep sleep (system-off/light-sleep)
+
+// --- USB Serial Sleep Block ---
+// When true, the device will NOT enter deep sleep while a USB Serial console
+// is open (useful for live debugging without the device powering down on you).
+// Set to false if you want the device to auto-sleep even with the Serial monitor attached.
+#define ENABLE_USB_SLEEP_BLOCK false
 
 #endif // CONFIG_H

@@ -21,7 +21,9 @@ enum SystemState
     STATE_READER_MENU,
     STATE_SD_BROWSE,
     STATE_USB_MSC,
-    STATE_CHAPTER_LIST
+    STATE_CHAPTER_LIST,
+    STATE_FONT_SETTINGS,
+    STATE_STATS
 };
 
 SystemState currentState = STATE_BOOT;
@@ -89,6 +91,16 @@ int selectedChapterIdx = 0;
 String chapterMenuOptions[MAX_CHAPTERS];
 bool restoringSleepState = false;
 
+// Font Settings submenu variables
+String fontMenuOptions[6];
+int fontMenuCount = 0;
+int selectedFontMenuIdx = 0;
+
+// Reading statistics
+uint32_t totalReadingSeconds = 0;     // Persisted cumulative seconds
+uint32_t currentSessionStartMs = 0;   // millis() at which current session began
+uint32_t currentSessionSeconds = 0;   // Accumulated seconds in the active session
+
 // Function declarations
 void transitionTo(SystemState newState);
 void handleMenu();
@@ -105,6 +117,14 @@ void enterDeepSleep();
 void bleStateCallback(bool connected);
 void bleProgressCallback(const String &status, int bytesReceived, bool finished);
 void handleUsbMsc();
+void handleFontSettings();
+void handleStats();
+void drawFontSettingsMenu();
+void accumulateSessionTime();
+uint32_t currentSessionSecondsLive();
+String formatDuration(uint32_t totalSeconds);
+void beginReadingSession();
+void endReadingSession();
 
 String getBookTitleFromPath(const String &path)
 {
@@ -217,6 +237,7 @@ bool loadBookChapters(const String &bookPath)
 
 void setup()
 {
+    uint32_t t0 = millis();
     Serial.begin(115200);
     // Wait for Serial to open if USB plugged in (non-blocking)
     uint32_t startSerial = millis();
@@ -225,94 +246,98 @@ void setup()
 
     Serial.println("\n--- nRF52840 e-Paper Book Reader ---");
 
-    Serial.println("Initializing battery...");
+    uint32_t t = millis();
+    Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Initializing battery...");
     analogReference(AR_INTERNAL_3_0); // 3.0V reference
     analogReadResolution(10);         // 10-bit resolution
 
-    Serial.println("Initializing Storage...");
+    t = millis();
+    Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Initializing Storage (InternalFS)...");
     if (!StorageManager::getInstance().begin())
     {
         Serial.println("Storage initialization failed!");
     }
 
-    Serial.println("Initializing Buttons...");
+    t = millis();
+    Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Migrating InternalFS -> SD...");
+    StorageManager::getInstance().migrateInternalFSFiles();
+
+    t = millis();
+    Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Reading stats from SD...");
+    uint32_t loadedSeconds = 0;
+    if (StorageManager::getInstance().readStats(loadedSeconds)) {
+        totalReadingSeconds = loadedSeconds;
+        Serial.print("Total reading time: ");
+        Serial.print(totalReadingSeconds);
+        Serial.println(" sec");
+    }
+
+    t = millis();
+    Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Initializing Buttons...");
     ButtonManager::getInstance().begin();
 
-    Serial.println("Initializing Display...");
+    t = millis();
+    Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Initializing Display (EPD)...");
     DisplayManager::getInstance().begin();
 
-    Serial.println("Initializing BLE...");
-    BleManager::getInstance().begin(bleStateCallback, bleProgressCallback);
-    BleManager::getInstance().startAdvertising(); // Start advertising on boot for buttonless prototyping
+    // BLE disabled — USB upload is faster and BLE is not currently used.
+    // t = millis();
+    // Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Initializing BLE...");
+    // BleManager::getInstance().begin(bleStateCallback, bleProgressCallback);
+    // BleManager::getInstance().startAdvertising();
 
+    t = millis();
+    Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Setup subsystems done.");
     lastActivityTime = millis();
-    Serial.println("Setup completed successfully.");
-    // Check if we have a saved sleep state
+    Serial.print("[T+"); Serial.print(millis() - t0); Serial.println("ms] Setup completed successfully.");
+    // Check if we have a saved sleep state (now on SD)
+    uint32_t t_before_sleep = millis();
     bool restoredFromSleepState = false;
-    if (InternalFS.exists("/sleep_state.dat"))
+    int savedState = 0, savedMenuIdx = 0, savedBookIdx = 0, savedSdBookIdx = 0;
+    int savedPcBookIdx = 0, savedChapterIdx = 0, savedReaderMenuIdx = 0, savedActiveChapterIdx = 0;
+    String savedActiveBook = "";
+    if (StorageManager::getInstance().readSleepState(savedState, savedMenuIdx, savedBookIdx,
+        savedSdBookIdx, savedPcBookIdx, savedChapterIdx, savedReaderMenuIdx, savedActiveBook, savedActiveChapterIdx))
     {
-        LfsFile file = InternalFS.open("/sleep_state.dat", FILE_O_READ);
-        if (file)
+        // Clear it so it's a one-time restore
+        StorageManager::getInstance().clearSleepState();
+
+        if (savedState == STATE_MENU || savedState == STATE_BOOK_LIST ||
+            savedState == STATE_SD_BROWSE || savedState == STATE_PC_BROWSE ||
+            savedState == STATE_CHAPTER_LIST || savedState == STATE_READER_MENU)
         {
-            int savedState = file.readStringUntil('\n').toInt();
-            int savedMenuIdx = file.readStringUntil('\n').toInt();
-            int savedBookIdx = file.readStringUntil('\n').toInt();
-            int savedSdBookIdx = file.readStringUntil('\n').toInt();
-            int savedPcBookIdx = file.readStringUntil('\n').toInt();
-            int savedChapterIdx = file.readStringUntil('\n').toInt();
-            int savedReaderMenuIdx = file.readStringUntil('\n').toInt();
+            selectedMenuIdx = savedMenuIdx;
+            selectedBookIdx = savedBookIdx;
+            selectedSdBookIdx = savedSdBookIdx;
+            selectedPcBookIdx = savedPcBookIdx;
+            selectedChapterIdx = savedChapterIdx;
+            selectedReaderMenuIdx = savedReaderMenuIdx;
 
-            String savedActiveBook = "";
-            if (file.available())
+            if (savedActiveBook.length() > 0)
             {
-                savedActiveBook = file.readStringUntil('\n');
-                savedActiveBook.trim();
-            }
-            int savedActiveChapterIdx = 0;
-            if (file.available())
-            {
-                savedActiveChapterIdx = file.readStringUntil('\n').toInt();
-            }
-
-            file.close();
-
-            // Delete it so it's a one-time restore
-            InternalFS.remove("/sleep_state.dat");
-
-            if (savedState == STATE_MENU || savedState == STATE_BOOK_LIST ||
-                savedState == STATE_SD_BROWSE || savedState == STATE_PC_BROWSE ||
-                savedState == STATE_CHAPTER_LIST || savedState == STATE_READER_MENU)
-            {
-
-                selectedMenuIdx = savedMenuIdx;
-                selectedBookIdx = savedBookIdx;
-                selectedSdBookIdx = savedSdBookIdx;
-                selectedPcBookIdx = savedPcBookIdx;
-                selectedChapterIdx = savedChapterIdx;
-                selectedReaderMenuIdx = savedReaderMenuIdx;
-
-                if (savedActiveBook.length() > 0)
+                activeBookFilename = savedActiveBook;
+                if (savedActiveBook.startsWith("[SD]"))
                 {
-                    activeBookFilename = savedActiveBook;
-                    if (savedActiveBook.startsWith("[SD]"))
+                    int slashIdx = savedActiveBook.indexOf('/', 4);
+                    if (slashIdx >= 0)
                     {
-                        int slashIdx = savedActiveBook.indexOf('/', 4);
-                        if (slashIdx >= 0)
-                        {
-                            String folderPath = savedActiveBook.substring(0, slashIdx + 1);
-                            loadBookChapters(folderPath);
-                        }
+                        String folderPath = savedActiveBook.substring(0, slashIdx + 1);
+                        loadBookChapters(folderPath);
                     }
                 }
-                activeChapterIdx = savedActiveChapterIdx;
-
-                restoringSleepState = true;
-                transitionTo((SystemState)savedState);
-                restoringSleepState = false;
-                restoredFromSleepState = true;
             }
+            activeChapterIdx = savedActiveChapterIdx;
+
+            restoringSleepState = true;
+            transitionTo((SystemState)savedState);
+            restoringSleepState = false;
+            restoredFromSleepState = true;
         }
     }
+
+    uint32_t t_after_sleep = millis();
+    Serial.print("[T+"); Serial.print(t_after_sleep - t0); Serial.println("ms] Sleep state restore done.");
+    (void)t_before_sleep; // unused
 
     if (!restoredFromSleepState)
     {
@@ -468,8 +493,8 @@ void setup()
 
 void loop()
 {
-    // Keep BLE stack updated
-    BleManager::getInstance().update();
+    // BLE disabled — BLE stack is not initialized, so skip update.
+    // BleManager::getInstance().update();
 
     // Poll and debounce button presses
     ButtonManager::getInstance().update();
@@ -509,6 +534,12 @@ void loop()
     case STATE_CHAPTER_LIST:
         handleChapterList();
         break;
+    case STATE_FONT_SETTINGS:
+        handleFontSettings();
+        break;
+    case STATE_STATS:
+        handleStats();
+        break;
     default:
         break;
     }
@@ -518,9 +549,18 @@ void loop()
     bool isBleConnected = BleManager::getInstance().isConnected() || BleManager::getInstance().isCentralConnected();
     bool isBleBusy = isBleConnected || (bleBytesReceived > 0);
     bool isUsbActive = Serial; // Checks if USB Serial is active/connected
+    bool usbBlocksSleep = isUsbActive;
+#if !ENABLE_USB_SLEEP_BLOCK
+    usbBlocksSleep = false; // override: allow sleep even with USB active
+#endif
 
-    if (currentState != STATE_USB_MSC && !isBleBusy && !isUsbActive && (millis() - lastActivityTime > AUTO_SLEEP_MS))
+    if (currentState != STATE_USB_MSC && !isBleBusy && !usbBlocksSleep && (millis() - lastActivityTime > AUTO_SLEEP_MS))
     {
+        // Persist any accumulated reading time before sleeping
+        if (currentState == STATE_READER) {
+            accumulateSessionTime();
+            StorageManager::getInstance().writeStats(totalReadingSeconds);
+        }
         enterDeepSleep();
     }
 
@@ -531,10 +571,21 @@ void loop()
 void transitionTo(SystemState newState)
 {
     bool isInitialTransition = (currentState == STATE_BOOT);
+
+    // Manage reading session: close any active session before leaving STATE_READER
+    if (currentState == STATE_READER && newState != STATE_READER) {
+        endReadingSession();
+    }
+
     currentState = newState;
     lastActivityTime = millis();
     if (!isInitialTransition) {
         ButtonManager::getInstance().reset();
+    }
+
+    // Open a new reading session when entering the reader
+    if (newState == STATE_READER) {
+        beginReadingSession();
     }
 
     // Enable PC stream bypass in BleManager if we are in PC Browse or Reader with a BLE book
@@ -559,6 +610,7 @@ void transitionTo(SystemState newState)
         menuOptions[menuCount++] = "Book List"; // Represents SD books
         menuOptions[menuCount++] = "USB SD Reader";
         menuOptions[menuCount++] = "BLE Upload Mode";
+        menuOptions[menuCount++] = "Reading Stats";
         menuOptions[menuCount++] = "Clear Storage";
 
         if (!restoringSleepState) {
@@ -814,6 +866,21 @@ void transitionTo(SystemState newState)
         MenuView menu("Select Chapter", chapterMenuOptions, bookChapterCount, selectedChapterIdx);
         DisplayManager::getInstance().draw(menu);
     }
+    else if (newState == STATE_FONT_SETTINGS)
+    {
+        Serial.println("Transition to: STATE_FONT_SETTINGS");
+        if (!restoringSleepState) {
+            selectedFontMenuIdx = 0;
+        }
+        drawFontSettingsMenu();
+    }
+    else if (newState == STATE_STATS)
+    {
+        Serial.println("Transition to: STATE_STATS");
+        String body = "Total reading time:\n" + formatDuration(totalReadingSeconds) + "\n\nCurrent session:\n" + formatDuration(currentSessionSecondsLive());
+        MessageView msg("Reading Stats", body, false);
+        DisplayManager::getInstance().draw(msg);
+    }
 }
 
 void handleMenu()
@@ -999,6 +1066,10 @@ void handleMenu()
         else if (selection == "BLE Upload Mode")
         {
             transitionTo(STATE_BLE_UPLOAD);
+        }
+        else if (selection == "Reading Stats")
+        {
+            transitionTo(STATE_STATS);
         }
         else if (selection == "Clear Storage")
         {
@@ -1313,50 +1384,117 @@ void bleProgressCallback(const String &status, int bytesReceived, bool finished)
     }
 }
 
+// ==================== Reading Session Helpers ====================
+
+void beginReadingSession()
+{
+    currentSessionStartMs = millis();
+    currentSessionSeconds = 0;
+}
+
+void endReadingSession()
+{
+    accumulateSessionTime();
+    // Persist cumulative total
+    StorageManager::getInstance().writeStats(totalReadingSeconds);
+    currentSessionStartMs = 0;
+}
+
+void accumulateSessionTime()
+{
+    if (currentSessionStartMs == 0) return;
+    uint32_t now = millis();
+    uint32_t elapsedMs = now - currentSessionStartMs;
+    currentSessionStartMs = now;
+    uint32_t elapsedSec = elapsedMs / 1000;
+    currentSessionSeconds += elapsedSec;
+    totalReadingSeconds += elapsedSec;
+}
+
+uint32_t currentSessionSecondsLive()
+{
+    if (currentSessionStartMs == 0) return currentSessionSeconds;
+    uint32_t now = millis();
+    uint32_t elapsedMs = now - currentSessionStartMs;
+    return currentSessionSeconds + (elapsedMs / 1000);
+}
+
+String formatDuration(uint32_t totalSeconds)
+{
+    uint32_t hours = totalSeconds / 3600;
+    uint32_t minutes = (totalSeconds % 3600) / 60;
+    uint32_t seconds = totalSeconds % 60;
+    if (hours > 0) {
+        return String(hours) + "h " + String(minutes) + "m";
+    }
+    if (minutes > 0) {
+        return String(minutes) + "m " + String(seconds) + "s";
+    }
+    return String(seconds) + "s";
+}
+
 void enterDeepSleep()
 {
     Serial.println("System idle timeout! Entering Deep Sleep (System OFF)...");
 
-    // Save state before going to sleep
-    if (InternalFS.exists("/sleep_state.dat")) {
-        InternalFS.remove("/sleep_state.dat");
-    }
-    LfsFile file = InternalFS.open("/sleep_state.dat", FILE_O_WRITE);
-    if (file) {
-        file.println(currentState);
-        file.println(selectedMenuIdx);
-        file.println(selectedBookIdx);
-        file.println(selectedSdBookIdx);
-        file.println(selectedPcBookIdx);
-        file.println(selectedChapterIdx);
-        file.println(selectedReaderMenuIdx);
-        file.println(activeBookFilename);
-        file.println(activeChapterIdx);
-        file.close();
-    }
+    // Save state to SD before going to sleep
+    StorageManager::getInstance().writeSleepState(
+        currentState, selectedMenuIdx, selectedBookIdx, selectedSdBookIdx,
+        selectedPcBookIdx, selectedChapterIdx, selectedReaderMenuIdx,
+        activeBookFilename, activeChapterIdx);
 
-    // 1. Power down e-Paper screen
+    // 1. Save ePaper framebuffer to SD so we can restore it on wake.
+    //    The IT8951 controller's RAM is wiped when VCC turns off (step 3).
+    //    Saving the buffer here lets us LDIM it back to the controller on
+    //    wake (no refresh), allowing the next view render to be a fast partial
+    //    refresh instead of a slow full refresh.
+    DisplayManager::getInstance().saveFramebufferToSD();
+
+    // 2. Power down e-Paper screen (puts controller in deep sleep)
     DisplayManager::getInstance().powerDown();
 
-    // 2. Terminate VCC power pin 13 to cut off all peripheral leaks
+    // 3. Terminate VCC power pin 13 to cut off all peripheral leaks
     ButtonManager::getInstance().setPeripheralPower(false);
 
-    // 3. Stop Bluetooth stack advertising/connection
+    // 4. Stop Bluetooth stack advertising/connection (no-op if BLE disabled)
     BleManager::getInstance().stopAdvertising();
 
-    // 4. Re-configure the button GPIOs to hardware-sense LOW levels to trigger wakeup
+    // 4. Re-configure the button GPIOs to hardware-sense LOW levels to trigger wakeup.
+    //    pinMode(INPUT_PULLUP_SENSE) sets DIR=input, INPUT=connect, PULL=pullup,
+    //    and SENSE=LOW. We follow up with an explicit register write to guarantee
+    //    the SENSE field is SENSE_LOW (0b11) on every button pin — some pins on
+    //    the nRF52840 don't reliably retain sense configuration across the
+    //    VCC-off / SPI-busy sequence that precedes this point.
     pinMode(PIN_BTN_PREV, INPUT_PULLUP_SENSE);
     pinMode(PIN_BTN_NEXT, INPUT_PULLUP_SENSE);
     pinMode(PIN_BTN_SELECT, INPUT_PULLUP_SENSE);
+    extern const uint32_t g_ADigitalPinMap[];
+    auto setSenseLow = [](uint8_t arduinoPin) {
+        uint32_t nrfPin = g_ADigitalPinMap[arduinoPin];
+        uint32_t cnf = NRF_GPIO->PIN_CNF[nrfPin];
+        cnf &= ~GPIO_PIN_CNF_SENSE_Msk;          // clear SENSE bits
+        cnf |= (3UL << GPIO_PIN_CNF_SENSE_Pos);   // set SENSE_LOW (0b11)
+        NRF_GPIO->PIN_CNF[nrfPin] = cnf;
+    };
+    setSenseLow(PIN_BTN_PREV);
+    setSenseLow(PIN_BTN_NEXT);
+    setSenseLow(PIN_BTN_SELECT);
 
     // 5. Set magic retention flag to identify deep sleep wakeup on boot
     sd_power_gpregret_clr(0, 0xFF);
     sd_power_gpregret_set(0, 0x55);
 
-    // 6. Trigger nRF52840 chip system off deep sleep
-    sd_power_system_off();
+    // 6. Enter System OFF. We use the direct register write
+    //    NRF_POWER->SYSTEMOFF = 1 instead of sd_power_system_off() because the
+    //    SoftDevice may not be enabled (BLE is disabled, no SoftDevice bringup).
+    //    The direct register write works regardless of SoftDevice state and
+    //    produces identical System OFF behavior.
+    NRF_POWER->SYSTEMOFF = 1;
 
-    // Microcontroller enters static sleep. Waking up resets the board and starts setup().
+    // Should be unreachable — chip is now in System OFF.
+    // If we somehow get here, halt the CPU so we don't keep printing.
+    __disable_irq();
+    while (1) { __WFE(); }
 }
 
 void drawReaderMenu()
@@ -1414,25 +1552,7 @@ void drawReaderMenu()
         readerMenuOptions[idx++] = "Select Chapter";
     }
 
-    FontType fontType = DisplayManager::getInstance().getFontType();
-    String fontName = "Sans";
-    if (fontType == FONT_SERIF)
-        fontName = "Bookerly";
-    else if (fontType == FONT_MONO)
-        fontName = "Mono";
-    else if (fontType == FONT_LITERATA)
-        fontName = "Literata";
-    else if (fontType == FONT_ATKINSON)
-        fontName = "Atkinson";
-    readerMenuOptions[idx++] = "Font: " + fontName;
-
-    FontSize fontSize = DisplayManager::getInstance().getFontSize();
-    String sizeName = "Small";
-    if (fontSize == SIZE_MEDIUM)
-        sizeName = "Medium";
-    else if (fontSize == SIZE_LARGE)
-        sizeName = "Large";
-    readerMenuOptions[idx++] = "Size: " + sizeName;
+    readerMenuOptions[idx++] = "Font Settings";
 
     readerMenuOptions[idx++] = "Orientation: " + String(DisplayManager::getInstance().isFlipped() ? "Flipped" : "Normal");
     readerMenuOptions[idx++] = "Exit to Main Menu";
@@ -1448,7 +1568,9 @@ void drawReaderMenu()
     {
         header = "Reader Menu (" + String(percent) + "%)";
     }
-    MenuView menu(header, readerMenuOptions, readerMenuCount, selectedReaderMenuIdx);
+
+    String sessionStr = "Session: " + formatDuration(currentSessionSecondsLive());
+    MenuView menu(header, readerMenuOptions, readerMenuCount, selectedReaderMenuIdx, sessionStr);
     DisplayManager::getInstance().draw(menu);
 }
 
@@ -1537,13 +1659,8 @@ void handleReaderMenu()
         }
         else if (selectedReaderMenuIdx == idx++)
         {
-            DisplayManager::getInstance().cycleFontType();
-            drawReaderMenu();
-        }
-        else if (selectedReaderMenuIdx == idx++)
-        {
-            DisplayManager::getInstance().cycleFontSize();
-            drawReaderMenu();
+            // Font Settings submenu
+            transitionTo(STATE_FONT_SETTINGS);
         }
         else if (selectedReaderMenuIdx == idx++)
         {
@@ -2202,5 +2319,108 @@ void handleChapterList()
     {
         lastActivityTime = millis();
         transitionTo(STATE_READER_MENU);
+    }
+}
+
+// ==================== Font Settings Submenu ====================
+
+void drawFontSettingsMenu()
+{
+    fontMenuCount = 0;
+
+    FontType fontType = DisplayManager::getInstance().getFontType();
+    String fontName = "Sans";
+    if (fontType == FONT_SERIF) fontName = "Bookerly";
+    else if (fontType == FONT_MONO) fontName = "Mono";
+    else if (fontType == FONT_LITERATA) fontName = "Literata";
+    else if (fontType == FONT_ATKINSON) fontName = "Atkinson";
+    fontMenuOptions[fontMenuCount++] = "Font: " + fontName;
+
+    FontSize fontSize = DisplayManager::getInstance().getFontSize();
+    String sizeName = "Small";
+    if (fontSize == SIZE_MEDIUM) sizeName = "Medium";
+    else if (fontSize == SIZE_LARGE) sizeName = "Large";
+    fontMenuOptions[fontMenuCount++] = "Size: " + sizeName;
+
+    LineSpacing lineSpacing = DisplayManager::getInstance().getLineSpacing();
+    String spacingName = "Compact";
+    if (lineSpacing == SPACING_NORMAL) spacingName = "Normal";
+    else if (lineSpacing == SPACING_RELAXED) spacingName = "Relaxed";
+    fontMenuOptions[fontMenuCount++] = "Spacing: " + spacingName;
+
+    ContrastMode contrast = DisplayManager::getInstance().getContrastMode();
+    String contrastName = (contrast == CONTRAST_INVERTED) ? "Inverted" : "Normal";
+    fontMenuOptions[fontMenuCount++] = "Contrast: " + contrastName;
+
+    fontMenuOptions[fontMenuCount++] = "[Back]";
+
+    MenuView menu("Font Settings", fontMenuOptions, fontMenuCount, selectedFontMenuIdx);
+    DisplayManager::getInstance().draw(menu);
+}
+
+void handleFontSettings()
+{
+    ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+    ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+
+    if (prev == BTN_CLICK)
+    {
+        lastActivityTime = millis();
+        selectedFontMenuIdx = (selectedFontMenuIdx - 1 + fontMenuCount) % fontMenuCount;
+        drawFontSettingsMenu();
+    }
+    else if (next == BTN_CLICK)
+    {
+        lastActivityTime = millis();
+        selectedFontMenuIdx = (selectedFontMenuIdx + 1) % fontMenuCount;
+        drawFontSettingsMenu();
+    }
+    else if (select == BTN_CLICK)
+    {
+        lastActivityTime = millis();
+
+        if (selectedFontMenuIdx == 0)
+        {
+            DisplayManager::getInstance().cycleFontType();
+            drawFontSettingsMenu();
+        }
+        else if (selectedFontMenuIdx == 1)
+        {
+            DisplayManager::getInstance().cycleFontSize();
+            drawFontSettingsMenu();
+        }
+        else if (selectedFontMenuIdx == 2)
+        {
+            DisplayManager::getInstance().cycleLineSpacing();
+            drawFontSettingsMenu();
+        }
+        else if (selectedFontMenuIdx == 3)
+        {
+            DisplayManager::getInstance().cycleContrastMode();
+            drawFontSettingsMenu();
+        }
+        else if (selectedFontMenuIdx == 4)
+        {
+            // Back — return to reader menu
+            transitionTo(STATE_READER_MENU);
+        }
+    }
+    else if (select == BTN_LONG_PRESS)
+    {
+        lastActivityTime = millis();
+        transitionTo(STATE_READER_MENU);
+    }
+}
+
+// ==================== Reading Statistics ====================
+
+void handleStats()
+{
+    ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+    if (select == BTN_CLICK || select == BTN_LONG_PRESS)
+    {
+        lastActivityTime = millis();
+        transitionTo(STATE_MENU);
     }
 }

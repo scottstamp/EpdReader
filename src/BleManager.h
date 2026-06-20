@@ -12,6 +12,7 @@ public:
     static BleManager& getInstance();
 
     void begin(BleStateCallback stateCb, BleProgressCallback progressCb);
+    void ensureReady(); // Lazy init if not yet initialized
     void startAdvertising();
     void stopAdvertising();
     bool isConnected() const;
@@ -65,6 +66,8 @@ private:
     bool _isScanning;
     uint16_t _centralConnHandle;
     bool _pcStreamActive;
+
+    bool _initialized;
 
     static BleManager* _instance;
 };

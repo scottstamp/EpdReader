@@ -33,7 +33,8 @@ BleManager::BleManager() :
     _centralConnected(false),
     _isScanning(false),
     _centralConnHandle(BLE_CONN_HANDLE_INVALID),
-    _pcStreamActive(false)
+    _pcStreamActive(false),
+    _initialized(false)
 {
     _instance = this;
 }
@@ -91,6 +92,14 @@ void BleManager::begin(BleStateCallback stateCb, BleProgressCallback progressCb)
     
     Bluefruit.Advertising.restartOnDisconnect(true);
     Bluefruit.Advertising.setInterval(32, 244); // Fast advertising (20ms to 150.25ms)
+    _initialized = true;
+}
+
+void BleManager::ensureReady() {
+    // No-op.
+    // On cold boot: BLE is initialized and advertising starts in setup().
+    // On sleep wake: BLE is intentionally left off until the user interacts.
+    // This method exists as a placeholder for future lazy-init if needed.
 }
 
 void BleManager::startAdvertising() {

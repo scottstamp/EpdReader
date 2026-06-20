@@ -21,6 +21,29 @@ public:
     bool readBookmark(const String& filename, uint32_t& offset);
     bool readBookmark(const String& filename, uint32_t& offset, uint32_t* historyDest, int maxHistoryLen, int& historyCount);
     uint32_t getUsedSpace();
+
+    // Reading statistics (persisted on SD /stats.dat)
+    bool readStats(uint32_t& totalSeconds);
+    bool writeStats(uint32_t totalSeconds);
+    void resetStats();
+
+    // ePaper framebuffer (persisted on SD /epd_buffer.dat, ~12 KB)
+    bool saveFramebuffer(const uint8_t* data, size_t len);
+    bool loadFramebuffer(uint8_t* data, size_t len);
+
+    // System settings (persisted on SD /settings.dat)
+    bool readSettings(int& fontType, int& fontSize, bool& isFlipped, int& lineSpacing, int& contrastMode);
+    bool writeSettings(int fontType, int fontSize, bool isFlipped, int lineSpacing, int contrastMode);
+
+    // Sleep state (persisted on SD /sleep_state.dat)
+    bool writeSleepState(int state, int menuIdx, int bookIdx, int sdBookIdx, int pcBookIdx,
+                         int chapterIdx, int readerMenuIdx, const String& activeBook, int activeChapterIdx);
+    bool readSleepState(int& state, int& menuIdx, int& bookIdx, int& sdBookIdx, int& pcBookIdx,
+                        int& chapterIdx, int& readerMenuIdx, String& activeBook, int& activeChapterIdx);
+    void clearSleepState();
+
+    // Migration: copy settings.dat, sleep_state.dat, stats.dat from InternalFS to SD, then delete originals
+    void migrateInternalFSFiles();
     
     // File I/O helpers
     Adafruit_LittleFS_Namespace::File openBook(const String& filename, const char* mode = "r");
@@ -56,6 +79,8 @@ private:
     bool _isUploading;
     SdFat sd;
     bool _sdInitialized;
+    bool _statsLoaded;
+    uint32_t _cachedTotalSeconds;
 };
 
 #endif // STORAGE_MANAGER_H

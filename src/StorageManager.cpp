@@ -36,7 +36,7 @@ StorageManager& StorageManager::getInstance() {
     return instance;
 }
 
-StorageManager::StorageManager() : _isUploading(false), _sdInitialized(false) {}
+StorageManager::StorageManager() : _isUploading(false), _sdInitialized(false), _statsLoaded(false), _cachedTotalSeconds(0) {}
 
 bool StorageManager::begin() {
     // Initialize USB Mass Storage interface
@@ -510,6 +510,7 @@ bool StorageManager::clearStorage() {
         return false;
     }
     createBookDir();
+    // /stats.dat lived on InternalFS; it has been wiped by the format.
 
     Serial.println("[Device Debug] Formatting progress/bookmarks on SD...");
     if (beginSD()) {
@@ -532,6 +533,9 @@ bool StorageManager::clearStorage() {
                 sd.rmdir("/bookmarks");
             }
         }
+        if (sd.exists("/settings.dat")) sd.remove("/settings.dat");
+        if (sd.exists("/sleep_state.dat")) sd.remove("/sleep_state.dat");
+        if (sd.exists("/stats.dat")) sd.remove("/stats.dat");
     }
     Serial.println("[Device Debug] Storage cleared successfully.");
     return true;
@@ -890,4 +894,249 @@ bool StorageManager::sdCardWriteSectors(uint32_t lba, const uint8_t* buffer, uin
 uint32_t StorageManager::sdCardSectorCount() {
     if (!_sdInitialized && !beginSD()) return 0;
     return sd.card()->sectorCount();
+}
+
+bool StorageManager::readStats(uint32_t& totalSeconds) {
+    if (!_statsLoaded) {
+        _statsLoaded = true;
+        _cachedTotalSeconds = 0;
+        if (beginSD() && sd.exists("/stats.dat")) {
+            FsFile file = sd.open("/stats.dat", O_RDONLY);
+            if (file) {
+                _cachedTotalSeconds = (uint32_t)file.readStringUntil('\n').toInt();
+                file.close();
+            }
+        }
+    }
+    totalSeconds = _cachedTotalSeconds;
+    return _statsLoaded; // true once we've tried to load (even if file didn't exist)
+}
+
+bool StorageManager::writeStats(uint32_t totalSeconds) {
+    _cachedTotalSeconds = totalSeconds;
+    _statsLoaded = true;
+    if (InternalFS.exists("/stats.dat")) {
+        InternalFS.remove("/stats.dat");
+    }
+    if (!beginSD()) return false;
+    if (sd.exists("/stats.dat")) sd.remove("/stats.dat");
+    FsFile file = sd.open("/stats.dat", O_WRONLY | O_CREAT | O_TRUNC);
+    if (!file) {
+        Serial.println("Failed to open stats.dat for writing.");
+        return false;
+    }
+    file.println(totalSeconds);
+    file.close();
+    return true;
+}
+
+void StorageManager::resetStats() {
+    _cachedTotalSeconds = 0;
+    _statsLoaded = true; // mark loaded so we don't re-read the (now-deleted) file
+    if (InternalFS.exists("/stats.dat")) {
+        InternalFS.remove("/stats.dat");
+    }
+    if (beginSD() && sd.exists("/stats.dat")) {
+        sd.remove("/stats.dat");
+    }
+}
+
+bool StorageManager::saveFramebuffer(const uint8_t* data, size_t len) {
+    if (!data || len == 0) return false;
+    if (!beginSD()) return false;
+    if (sd.exists("/epd_buffer.dat")) sd.remove("/epd_buffer.dat");
+    FsFile file = sd.open("/epd_buffer.dat", O_WRONLY | O_CREAT | O_TRUNC);
+    if (!file) {
+        Serial.println("[FB] Failed to open epd_buffer.dat for writing.");
+        return false;
+    }
+    size_t written = file.write(data, len);
+    file.close();
+    if (written != len) {
+        Serial.print("[FB] Short write to epd_buffer.dat: ");
+        Serial.print(written);
+        Serial.print("/");
+        Serial.println(len);
+        sd.remove("/epd_buffer.dat");
+        return false;
+    }
+    return true;
+}
+
+bool StorageManager::loadFramebuffer(uint8_t* data, size_t len) {
+    if (!data || len == 0) return false;
+    if (!beginSD()) return false;
+    if (!sd.exists("/epd_buffer.dat")) return false;
+    FsFile file = sd.open("/epd_buffer.dat", O_RDONLY);
+    if (!file) return false;
+    size_t expected = file.size();
+    if (expected != len) {
+        // Size mismatch (different panel or partial write). Skip.
+        file.close();
+        return false;
+    }
+    size_t got = file.read(data, len);
+    file.close();
+    if (got != len) return false;
+    return true;
+}
+
+bool StorageManager::readSettings(int& fontType, int& fontSize, bool& isFlipped, int& lineSpacing, int& contrastMode) {
+    // Defaults
+    fontType = 0;
+    fontSize = 1;
+    isFlipped = false;
+    lineSpacing = 1;
+    contrastMode = 0;
+
+    if (!beginSD()) return false;
+    if (!sd.exists("/settings.dat")) return false;
+
+    FsFile file = sd.open("/settings.dat", O_RDONLY);
+    if (!file) return false;
+
+    fontType = file.readStringUntil('\n').toInt();
+    fontSize = file.readStringUntil('\n').toInt();
+    isFlipped = (file.readStringUntil('\n').toInt() == 1);
+    lineSpacing = file.readStringUntil('\n').toInt();
+    contrastMode = file.readStringUntil('\n').toInt();
+    file.close();
+    return true;
+}
+
+bool StorageManager::writeSettings(int fontType, int fontSize, bool isFlipped, int lineSpacing, int contrastMode) {
+    if (!beginSD()) return false;
+    if (sd.exists("/settings.dat")) sd.remove("/settings.dat");
+    FsFile file = sd.open("/settings.dat", O_WRONLY | O_CREAT | O_TRUNC);
+    if (!file) return false;
+    file.println(fontType);
+    file.println(fontSize);
+    file.println(isFlipped ? 1 : 0);
+    file.println(lineSpacing);
+    file.println(contrastMode);
+    file.close();
+    return true;
+}
+
+bool StorageManager::writeSleepState(int state, int menuIdx, int bookIdx, int sdBookIdx, int pcBookIdx,
+                                     int chapterIdx, int readerMenuIdx, const String& activeBook, int activeChapterIdx) {
+    if (!beginSD()) return false;
+    if (sd.exists("/sleep_state.dat")) sd.remove("/sleep_state.dat");
+    FsFile file = sd.open("/sleep_state.dat", O_WRONLY | O_CREAT | O_TRUNC);
+    if (!file) return false;
+    file.println(state);
+    file.println(menuIdx);
+    file.println(bookIdx);
+    file.println(sdBookIdx);
+    file.println(pcBookIdx);
+    file.println(chapterIdx);
+    file.println(readerMenuIdx);
+    file.println(activeBook);
+    file.println(activeChapterIdx);
+    file.close();
+    return true;
+}
+
+bool StorageManager::readSleepState(int& state, int& menuIdx, int& bookIdx, int& sdBookIdx, int& pcBookIdx,
+                                    int& chapterIdx, int& readerMenuIdx, String& activeBook, int& activeChapterIdx) {
+    if (!beginSD()) return false;
+    if (!sd.exists("/sleep_state.dat")) return false;
+    FsFile file = sd.open("/sleep_state.dat", O_RDONLY);
+    if (!file) return false;
+    state = file.readStringUntil('\n').toInt();
+    menuIdx = file.readStringUntil('\n').toInt();
+    bookIdx = file.readStringUntil('\n').toInt();
+    sdBookIdx = file.readStringUntil('\n').toInt();
+    pcBookIdx = file.readStringUntil('\n').toInt();
+    chapterIdx = file.readStringUntil('\n').toInt();
+    readerMenuIdx = file.readStringUntil('\n').toInt();
+    if (file.available()) activeBook = file.readStringUntil('\n');
+    activeBook.trim();
+    if (file.available()) activeChapterIdx = file.readStringUntil('\n').toInt();
+    file.close();
+    return true;
+}
+
+void StorageManager::clearSleepState() {
+    if (beginSD() && sd.exists("/sleep_state.dat")) {
+        sd.remove("/sleep_state.dat");
+    }
+}
+
+void StorageManager::migrateInternalFSFiles() {
+    // Migrate settings.dat
+    if (InternalFS.exists("/settings.dat")) {
+        Serial.println("[Migration] Found settings.dat on InternalFS, migrating to SD...");
+        if (beginSD()) {
+            if (sd.exists("/settings.dat")) sd.remove("/settings.dat");
+            LfsFile src = InternalFS.open("/settings.dat", FILE_O_READ);
+            if (src) {
+                FsFile dst = sd.open("/settings.dat", O_WRONLY | O_CREAT | O_TRUNC);
+                if (dst) {
+                    uint8_t buf[64];
+                    int r;
+                    while ((r = src.read(buf, sizeof(buf))) > 0) {
+                        dst.write(buf, r);
+                    }
+                    dst.close();
+                    Serial.println("[Migration] settings.dat migrated successfully.");
+                }
+                src.close();
+                // Delete from InternalFS after verifying the copy
+                InternalFS.remove("/settings.dat");
+                Serial.println("[Migration] settings.dat removed from InternalFS.");
+            }
+        }
+    }
+
+    // Migrate sleep_state.dat
+    if (InternalFS.exists("/sleep_state.dat")) {
+        Serial.println("[Migration] Found sleep_state.dat on InternalFS, migrating to SD...");
+        if (beginSD()) {
+            if (sd.exists("/sleep_state.dat")) sd.remove("/sleep_state.dat");
+            LfsFile src = InternalFS.open("/sleep_state.dat", FILE_O_READ);
+            if (src) {
+                FsFile dst = sd.open("/sleep_state.dat", O_WRONLY | O_CREAT | O_TRUNC);
+                if (dst) {
+                    uint8_t buf[64];
+                    int r;
+                    while ((r = src.read(buf, sizeof(buf))) > 0) {
+                        dst.write(buf, r);
+                    }
+                    dst.close();
+                    Serial.println("[Migration] sleep_state.dat migrated successfully.");
+                }
+                src.close();
+                InternalFS.remove("/sleep_state.dat");
+                Serial.println("[Migration] sleep_state.dat removed from InternalFS.");
+            }
+        }
+    }
+
+    // Migrate stats.dat
+    if (InternalFS.exists("/stats.dat")) {
+        Serial.println("[Migration] Found stats.dat on InternalFS, migrating to SD...");
+        if (beginSD()) {
+            if (sd.exists("/stats.dat")) sd.remove("/stats.dat");
+            LfsFile src = InternalFS.open("/stats.dat", FILE_O_READ);
+            if (src) {
+                FsFile dst = sd.open("/stats.dat", O_WRONLY | O_CREAT | O_TRUNC);
+                if (dst) {
+                    uint8_t buf[64];
+                    int r;
+                    while ((r = src.read(buf, sizeof(buf))) > 0) {
+                        dst.write(buf, r);
+                    }
+                    dst.close();
+                    Serial.println("[Migration] stats.dat migrated successfully.");
+                }
+                src.close();
+                InternalFS.remove("/stats.dat");
+                Serial.println("[Migration] stats.dat removed from InternalFS.");
+            }
+        }
+    }
+
+    // Invalidate cached stats so next read picks up the migrated (or new) SD version
+    _statsLoaded = false;
 }

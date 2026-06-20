@@ -8,6 +8,8 @@
 
 enum FontType { FONT_SANS, FONT_SERIF, FONT_MONO, FONT_LITERATA, FONT_ATKINSON };
 enum FontSize { SIZE_SMALL, SIZE_MEDIUM, SIZE_LARGE };
+enum LineSpacing { SPACING_COMPACT, SPACING_NORMAL, SPACING_RELAXED };
+enum ContrastMode { CONTRAST_NORMAL, CONTRAST_INVERTED };
 
 class UIView {
 public:
@@ -35,13 +37,14 @@ private:
 
 class MenuView : public UIView {
 public:
-    MenuView(const String& header, const String options[], int count, int selectedIdx);
+    MenuView(const String& header, const String options[], int count, int selectedIdx, const String& footer = "");
     void render(Adafruit_GFX& display) override;
 private:
     String _header;
     const String* _options;
     int _count;
     int _selectedIdx;
+    String _footer;
 };
 
 class MessageView : public UIView {
@@ -91,12 +94,33 @@ public:
     void cycleFontType();
     void cycleFontSize();
 
+    // Line Spacing Configuration
+    LineSpacing getLineSpacing() const { return _lineSpacing; }
+    void setLineSpacing(LineSpacing spacing);
+    void cycleLineSpacing();
+
+    // Contrast Configuration (normal vs inverted/dark mode)
+    ContrastMode getContrastMode() const { return _contrastMode; }
+    void setContrastMode(ContrastMode mode);
+    void cycleContrastMode();
+
+    // Color helpers — return GxEPD colors based on current contrast mode
+    uint16_t getInkColor() const;
+    uint16_t getPaperColor() const;
+
     // Orientation Configuration
     bool isFlipped() const { return _isFlipped; }
     void setFlipped(bool flipped);
 
     void loadSettings();
     void saveSettings();
+
+    // Framebuffer save/restore for fast wake. Saves the current ePaper
+    // framebuffer to SD before sleep. On wake, LDIMs the saved buffer to
+    // the controller's RAM (without triggering a refresh) so subsequent
+    // updates can be partial refreshes instead of full.
+    void saveFramebufferToSD();
+    void loadFramebufferOnWake();
 
     int getBatteryPercent();
     void drawBattery(Adafruit_GFX& display);
@@ -134,6 +158,8 @@ private:
     // Font settings
     FontType _fontType;
     FontSize _fontSize;
+    LineSpacing _lineSpacing;
+    ContrastMode _contrastMode;
 
     // Orientation settings
     bool _isFlipped;
