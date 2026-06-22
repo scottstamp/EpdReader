@@ -15,7 +15,9 @@
 #include "AtkinsonHyperlegibleNext9pt7b.h"
 #include "AtkinsonHyperlegibleNext12pt7b.h"
 #include "AtkinsonHyperlegibleNext18pt7b.h"
+#define private public
 #include <GxEPD2_BW.h>
+#undef private
 #include <gdey/GxEPD2_370_GDEY037T03.h>
 #include <SPI.h>
 #include <SdFat.h>
@@ -847,28 +849,11 @@ void DisplayManager::saveSettings() {
 }
 
 void DisplayManager::saveFramebufferToSD() {
-  // Read every pixel via the public GFX getPixel() accessor (reads the
-  // private _buffer internally) and pack into a 1-bpp byte array. ~100k
-  // pixels at ~1us each = ~100ms. Acceptable as a one-time pre-sleep cost.
+  // Directly save the internal _buffer array of the epd object
   const int width = (int)GxEPD2_370_GDEY037T03::WIDTH;
   const int height = (int)GxEPD2_370_GDEY037T03::HEIGHT;
   const int bytes = (width * height + 7) / 8;
-  uint8_t* buf = (uint8_t*)malloc(bytes);
-  if (!buf) {
-    Serial.println("[FB] malloc failed for framebuffer save");
-    return;
-  }
-  memset(buf, 0, bytes);
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      int bitIndex = y * width + x;
-      if (epd.getPixel(x, y) == GxEPD_BLACK) {
-        buf[bitIndex / 8] |= (0x80 >> (bitIndex & 7));
-      }
-    }
-  }
-  bool ok = StorageManager::getInstance().saveFramebuffer(buf, bytes);
-  free(buf);
+  bool ok = StorageManager::getInstance().saveFramebuffer(epd._buffer, bytes);
   if (ok) {
     Serial.print("[FB] Saved ");
     Serial.print(bytes);
@@ -877,10 +862,8 @@ void DisplayManager::saveFramebufferToSD() {
 }
 
 void DisplayManager::loadFramebufferOnWake() {
-  // Load the saved buffer from SD, then LDIM it to the controller's frame
-  // buffer (without triggering a refresh). The controller now knows the
-  // current display state. When the next render happens, it can be a fast
-  // partial refresh (~0.5s) instead of a slow full refresh (~2-4s).
+  // Load the saved buffer from SD, then restore it to both the MCU's frame buffer
+  // and the controller's previous (0x10) and current (0x13) buffers.
   const int width = (int)GxEPD2_370_GDEY037T03::WIDTH;
   const int height = (int)GxEPD2_370_GDEY037T03::HEIGHT;
   const int bytes = (width * height + 7) / 8;
@@ -894,15 +877,18 @@ void DisplayManager::loadFramebufferOnWake() {
     free(buf);
     return;
   }
-  // LDIM-only: write the saved buffer to the controller's frame buffer
-  // without triggering a display update. epd2 is the public driver member
-  // of GxEPD2_BW; writeImage sends IT8951 command 0x13 (set current
-  // frame) but does NOT call refresh/DPYEN.
+
+  // 1. Copy to MCU's internal framebuffer
+  memcpy(epd._buffer, buf, bytes);
+
+  // 2. Write to both controller buffers (0x10 previous and 0x13 current)
+  // to populate the controller's internal RAM after power cycle.
   powerUp();
-  epd.epd2.writeImage(buf, 0, 0, width, height);
+  epd.epd2.writeImageForFullRefresh(buf, 0, 0, width, height);
   powerDown();
+
   free(buf);
-  Serial.println("[FB] LDIM-only framebuffer restore complete; next render can be partial.");
+  Serial.println("[FB] Framebuffer restore complete; next render can be a partial update.");
 }
 
 void DisplayManager::checkAndTriggerPreFetch(const String& filename) {
