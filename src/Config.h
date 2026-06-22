@@ -53,8 +53,8 @@
 
 // --- System Auto-Sleep Timeout ---
 #define AUTO_SLEEP_MS                                                          \
-  15000 // 15 seconds of inactivity before deep sleep (system-off/light-sleep)
-  // 120000 // 2 minutes of inactivity before deep sleep (system-off/light-sleep)
+  240000 // 2 minutes of inactivity before deep sleep (system-off/light-sleep)
+  // 15000 // 15 seconds of inactivity before deep sleep (system-off/light-sleep)
 
 // --- USB Serial Sleep Block ---
 // When true, the device will NOT enter deep sleep while a USB Serial console

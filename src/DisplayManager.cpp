@@ -16,9 +16,11 @@
 #include "AtkinsonHyperlegibleNext12pt7b.h"
 #include "AtkinsonHyperlegibleNext18pt7b.h"
 #define private public
+#define protected public
 #include <GxEPD2_BW.h>
-#undef private
 #include <gdey/GxEPD2_370_GDEY037T03.h>
+#undef private
+#undef protected
 #include <SPI.h>
 #include <SdFat.h>
 
@@ -110,35 +112,34 @@ void DisplayManager::begin() {
   // Set custom SPI pins before initialization to support custom board pinouts
   SPI.setPins(EPD_MISO, EPD_SCK, EPD_MOSI);
 
-  // Read the general purpose retention register to identify deep sleep wakeups
-  uint32_t gpregret = NRF_POWER->GPREGRET;
-
-  // Check if the magic retention flag (0x55) is set
-  if (gpregret == 0x55) {
-    _isWakeupFromSleep = true;
-    NRF_POWER->GPREGRET = 0; // Clear the flag
-  } else {
-    _isWakeupFromSleep = false;
-  }
-
-  Serial.print("[Display Debug] GPREGRET register: 0x");
-  Serial.print(gpregret, HEX);
+  Serial.print("[Display Debug] Wakeup flag: ");
   if (_isWakeupFromSleep) {
-    Serial.println(" -> Woke up from Deep Sleep.");
+    Serial.println("true -> Woke up from Deep Sleep.");
   } else {
-    Serial.println(" -> Cold Power-On / Pin Reset.");
+    Serial.println("false -> Cold Power-On / Pin Reset.");
   }
 
   // GxEPD2 setup
+  int16_t savedRst = epd.epd2._rst;
+  if (_isWakeupFromSleep) {
+    // Drive reset pin HIGH manually so the chip is kept out of reset
+    pinMode(EPD_RST, OUTPUT);
+    digitalWrite(EPD_RST, HIGH);
+    epd.epd2._rst = -1; // Temp disable reset pin to bypass hardware reset pulse
+  }
+
   epd.init(115200, !_isWakeupFromSleep, 1,
            false); // SPI init (initial=false on sleep wakeup to bypass forced
                    // full refresh)
+
+  if (_isWakeupFromSleep) {
+    epd.epd2._rst = savedRst; // Restore reset pin
+  }
+
   loadSettings();
   epd.setRotation(_isFlipped ? 3 : 1);
 
-  // On wake: LDIM the saved framebuffer to the controller (no refresh).
-  // This populates the controller's internal RAM so the next render can be a
-  // fast partial refresh instead of a slow full refresh.
+  // On wake: load the saved framebuffer and write to both previous/current registers
   if (_isWakeupFromSleep) {
     loadFramebufferOnWake();
   } else {
@@ -146,6 +147,7 @@ void DisplayManager::begin() {
     clear();
   }
 }
+
 
 void DisplayManager::clear() {
   powerUp();
@@ -168,11 +170,19 @@ void DisplayManager::powerUp() {
   // we must reinitialize the display registers.
   if (_displayNeedsReinit) {
     Serial.println("[Display Debug] Re-initializing display registers after power cycle...");
+    int16_t savedRst = epd.epd2._rst;
+    pinMode(EPD_RST, OUTPUT);
+    digitalWrite(EPD_RST, HIGH);
+    epd.epd2._rst = -1; // Temp disable reset pin to bypass hardware reset pulse
+
     epd.init(115200, false, 1, false);
+
+    epd.epd2._rst = savedRst; // Restore reset pin
     epd.setRotation(_isFlipped ? 3 : 1);
     _displayNeedsReinit = false;
   }
 }
+
 
 // History circular queue implementation
 void DisplayManager::clearHistory() {
@@ -861,6 +871,30 @@ void DisplayManager::saveFramebufferToSD() {
   }
 }
 
+static void writeImageForFullRefreshFast(const uint8_t* buf, int bytes) {
+  const int width = (int)GxEPD2_370_GDEY037T03::WIDTH;
+  const int height = (int)GxEPD2_370_GDEY037T03::HEIGHT;
+  
+  if (!epd.epd2._init_display_done) epd.epd2._InitDisplay();
+  
+  epd.epd2._writeCommand(0x91); // partial in
+  epd.epd2._setPartialRamArea(0, 0, width, height);
+
+  // Write previous buffer (0x10)
+  epd.epd2._writeCommand(0x10);
+  epd.epd2._startTransfer();
+  SPI.transfer((void*)buf, NULL, bytes);
+  epd.epd2._endTransfer();
+
+  // Write current buffer (0x13)
+  epd.epd2._writeCommand(0x13);
+  epd.epd2._startTransfer();
+  SPI.transfer((void*)buf, NULL, bytes);
+  epd.epd2._endTransfer();
+
+  epd.epd2._writeCommand(0x92); // partial out
+}
+
 void DisplayManager::loadFramebufferOnWake() {
   // Load the saved buffer from SD, then restore it to both the MCU's frame buffer
   // and the controller's previous (0x10) and current (0x13) buffers.
@@ -884,7 +918,7 @@ void DisplayManager::loadFramebufferOnWake() {
   // 2. Write to both controller buffers (0x10 previous and 0x13 current)
   // to populate the controller's internal RAM after power cycle.
   powerUp();
-  epd.epd2.writeImageForFullRefresh(buf, 0, 0, width, height);
+  writeImageForFullRefreshFast(buf, bytes);
   powerDown();
 
   free(buf);

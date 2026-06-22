@@ -126,6 +126,7 @@ public:
     void drawBattery(Adafruit_GFX& display);
 
     bool isWakeupFromSleep() const { return _isWakeupFromSleep; }
+    void setWakeupFromSleep(bool wakeup) { _isWakeupFromSleep = wakeup; }
     void checkAndTriggerPreFetch(const String& filename);
 
     bool getDisplayNeedsReinit() const { return _displayNeedsReinit; }

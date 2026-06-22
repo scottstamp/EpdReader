@@ -754,14 +754,22 @@ bool StorageManager::beginSD() {
     
     Serial.println("[SD Debug] Initializing SD Card...");
 
-    // Initialize SdFat using SdSpiConfig at 4 MHz clock speed.
+    // Initialize SdFat using SdSpiConfig at 16 MHz clock speed.
     // By passing USER_SPI_BEGIN, we prevent SdFat from calling SPI.begin() internally.
-    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(4), &SPI2))) {
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(16), &SPI2))) {
         _sdInitialized = true;
-        Serial.println("[SD Debug] SD Card initialized successfully at 4 MHz.");
+        Serial.println("[SD Debug] SD Card initialized successfully at 16 MHz.");
         return true;
     }
     
+    // Fallback: try lower speed (4 MHz)
+    Serial.println("[SD Debug] 16 MHz failed, retrying at 4 MHz...");
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(4), &SPI2))) {
+        _sdInitialized = true;
+        Serial.println("[SD Debug] SD Card initialized at 4 MHz.");
+        return true;
+    }
+
     // Fallback: try lower speed (2 MHz)
     Serial.println("[SD Debug] 4 MHz failed, retrying at 2 MHz...");
     if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(2), &SPI2))) {
@@ -792,9 +800,15 @@ bool StorageManager::beginSD() {
 
     // Try to initialize again after power cycle
     Serial.println("[SD Debug] Retrying SD Card initialization after power cycle...");
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(16), &SPI2))) {
+        _sdInitialized = true;
+        Serial.println("[SD Debug] SD Card recovered successfully at 16 MHz after power cycle.");
+        return true;
+    }
+
     if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(4), &SPI2))) {
         _sdInitialized = true;
-        Serial.println("[SD Debug] SD Card recovered successfully at 4 MHz after power cycle.");
+        Serial.println("[SD Debug] SD Card recovered at 4 MHz after power cycle.");
         return true;
     }
 

@@ -90,6 +90,8 @@ int selectedReaderMenuIdx = 0;
 int selectedChapterIdx = 0;
 String chapterMenuOptions[MAX_CHAPTERS];
 bool restoringSleepState = false;
+bool wakeupFromSleep = false;
+
 
 // Font Settings submenu variables
 String fontMenuOptions[6];
@@ -198,31 +200,19 @@ bool loadBookChapters(const String &bookPath)
         if (filename.length() > 0)
         {
             String fullPath = folderName + filename;
-            FsFile chapFile = StorageManager::getInstance().openSDBook(fullPath, O_RDONLY);
-            if (chapFile)
-            {
-                bookChapters[bookChapterCount].title = title;
-                bookChapters[bookChapterCount].filename = fullPath;
-                bookChapters[bookChapterCount].size = chapFile.size();
-                chapFile.close();
+            bookChapters[bookChapterCount].title = title;
+            bookChapters[bookChapterCount].filename = fullPath;
+            bookChapters[bookChapterCount].size = 0; // Defer size loading until active
 
-                Serial.print("[Chapters] Loaded Chapter ");
-                Serial.print(bookChapterCount);
-                Serial.print(": ");
-                Serial.print(title);
-                Serial.print(" (");
-                Serial.print(filename);
-                Serial.print(", ");
-                Serial.print(bookChapters[bookChapterCount].size);
-                Serial.println(" bytes)");
+            Serial.print("[Chapters] Loaded Chapter ");
+            Serial.print(bookChapterCount);
+            Serial.print(": ");
+            Serial.print(title);
+            Serial.print(" (");
+            Serial.print(filename);
+            Serial.println(", size deferred)");
 
-                bookChapterCount++;
-            }
-            else
-            {
-                Serial.print("[Chapters] Warning: chapter file not found: ");
-                Serial.println(fullPath);
-            }
+            bookChapterCount++;
         }
     }
     indexFile.close();
@@ -237,7 +227,18 @@ bool loadBookChapters(const String &bookPath)
 
 void setup()
 {
+    // 1. Immediately power on peripherals VCC (pin 13 driven LOW)
+    pinMode(13, OUTPUT);
+    digitalWrite(13, LOW); // LOW = Power ON on nice!nano
+    delay(15); // Let power stabilize
+
+    // 2. Read and clear GPREGRET immediately to detect sleep wake-up before other libraries run
+    uint32_t bootGpregret = NRF_POWER->GPREGRET;
+    wakeupFromSleep = (bootGpregret == 0x55);
+    NRF_POWER->GPREGRET = 0; // Clear register
+
     uint32_t t0 = millis();
+
     Serial.begin(115200);
     // Wait for Serial to open if USB plugged in (non-blocking)
     uint32_t startSerial = millis();
@@ -278,7 +279,9 @@ void setup()
 
     t = millis();
     Serial.print("[T+"); Serial.print(t - t0); Serial.println("ms] Initializing Display (EPD)...");
+    DisplayManager::getInstance().setWakeupFromSleep(wakeupFromSleep);
     DisplayManager::getInstance().begin();
+
 
     // BLE disabled — USB upload is faster and BLE is not currently used.
     // t = millis();
@@ -378,6 +381,15 @@ void setup()
                         {
                             activeChapterIdx = foundIdx;
                             activeBookFilename = savedBook;
+                            if (bookChapters[activeChapterIdx].size == 0)
+                            {
+                                FsFile chapFile = StorageManager::getInstance().openSDBook(bookChapters[activeChapterIdx].filename, O_RDONLY);
+                                if (chapFile)
+                                {
+                                    bookChapters[activeChapterIdx].size = chapFile.size();
+                                    chapFile.close();
+                                }
+                            }
                             activeBookSize = bookChapters[activeChapterIdx].size;
                             activeBookTitle = getBookTitleFromPath(folderPath);
 
@@ -1236,6 +1248,15 @@ void handleReader()
                 {
                     activeChapterIdx++;
                     activeBookFilename = "[SD]" + bookChapters[activeChapterIdx].filename;
+                    if (bookChapters[activeChapterIdx].size == 0)
+                    {
+                        FsFile chapFile = StorageManager::getInstance().openSDBook(bookChapters[activeChapterIdx].filename, O_RDONLY);
+                        if (chapFile)
+                        {
+                            bookChapters[activeChapterIdx].size = chapFile.size();
+                            chapFile.close();
+                        }
+                    }
                     activeBookSize = bookChapters[activeChapterIdx].size;
 
                     currentPageOffset = ((uint32_t)activeChapterIdx << 24) | 0;
@@ -1283,6 +1304,15 @@ void handleReader()
                 {
                     activeChapterIdx = prevChapterIdx;
                     activeBookFilename = "[SD]" + bookChapters[activeChapterIdx].filename;
+                    if (bookChapters[activeChapterIdx].size == 0)
+                    {
+                        FsFile chapFile = StorageManager::getInstance().openSDBook(bookChapters[activeChapterIdx].filename, O_RDONLY);
+                        if (chapFile)
+                        {
+                            bookChapters[activeChapterIdx].size = chapFile.size();
+                            chapFile.close();
+                        }
+                    }
                     activeBookSize = bookChapters[activeChapterIdx].size;
                 }
             }
@@ -1444,10 +1474,9 @@ void enterDeepSleep()
         activeBookFilename, activeChapterIdx);
 
     // 1. Save ePaper framebuffer to SD so we can restore it on wake.
-    //    The IT8951 controller's RAM is wiped when VCC turns off (step 3).
-    //    Saving the buffer here lets us LDIM it back to the controller on
-    //    wake (no refresh), allowing the next view render to be a fast partial
-    //    refresh instead of a slow full refresh.
+    //    The UC8253 controller's RAM is wiped when VCC turns off (step 3).
+    //    Saving the buffer here lets us restore it on wake, allowing the next
+    //    view render to be a fast partial refresh instead of a slow full refresh.
     DisplayManager::getInstance().saveFramebufferToSD();
 
     // 2. Power down e-Paper screen (puts controller in deep sleep)
@@ -1481,8 +1510,7 @@ void enterDeepSleep()
     setSenseLow(PIN_BTN_SELECT);
 
     // 5. Set magic retention flag to identify deep sleep wakeup on boot
-    sd_power_gpregret_clr(0, 0xFF);
-    sd_power_gpregret_set(0, 0x55);
+    NRF_POWER->GPREGRET = 0x55;
 
     // 6. Enter System OFF. We use the direct register write
     //    NRF_POWER->SYSTEMOFF = 1 instead of sd_power_system_off() because the
@@ -1524,6 +1552,15 @@ void drawReaderMenu()
         uint32_t bmkChapSize = activeBookSize;
         if (isActiveBookChapterized && bmkChapterIdx < (uint32_t)bookChapterCount)
         {
+            if (bookChapters[bmkChapSize == activeBookSize ? bmkChapterIdx : bmkChapterIdx].size == 0)
+            {
+                FsFile chapFile = StorageManager::getInstance().openSDBook(bookChapters[bmkChapterIdx].filename, O_RDONLY);
+                if (chapFile)
+                {
+                    bookChapters[bmkChapterIdx].size = chapFile.size();
+                    chapFile.close();
+                }
+            }
             bmkChapSize = bookChapters[bmkChapterIdx].size;
         }
 
@@ -2120,6 +2157,15 @@ void handleSdBrowse()
                     }
                     activeChapterIdx = foundIdx;
                     activeBookFilename = savedBook;
+                    if (bookChapters[activeChapterIdx].size == 0)
+                    {
+                        FsFile chapFile = StorageManager::getInstance().openSDBook(bookChapters[activeChapterIdx].filename, O_RDONLY);
+                        if (chapFile)
+                        {
+                            bookChapters[activeChapterIdx].size = chapFile.size();
+                            chapFile.close();
+                        }
+                    }
                     activeBookSize = bookChapters[activeChapterIdx].size;
 
                     // Normalize offset to always carry chapter index in upper byte
@@ -2153,6 +2199,15 @@ void handleSdBrowse()
                         bmkChapterIdx = 0;
                     activeChapterIdx = bmkChapterIdx;
                     activeBookFilename = "[SD]" + bookChapters[activeChapterIdx].filename;
+                    if (bookChapters[activeChapterIdx].size == 0)
+                    {
+                        FsFile chapFile = StorageManager::getInstance().openSDBook(bookChapters[activeChapterIdx].filename, O_RDONLY);
+                        if (chapFile)
+                        {
+                            bookChapters[activeChapterIdx].size = chapFile.size();
+                            chapFile.close();
+                        }
+                    }
                     activeBookSize = bookChapters[activeChapterIdx].size;
                     currentPageOffset = bmkOffset;
 
@@ -2171,6 +2226,15 @@ void handleSdBrowse()
                 {
                     activeChapterIdx = 0;
                     activeBookFilename = "[SD]" + bookChapters[0].filename;
+                    if (bookChapters[0].size == 0)
+                    {
+                        FsFile chapFile = StorageManager::getInstance().openSDBook(bookChapters[0].filename, O_RDONLY);
+                        if (chapFile)
+                        {
+                            bookChapters[0].size = chapFile.size();
+                            chapFile.close();
+                        }
+                    }
                     activeBookSize = bookChapters[0].size;
                     currentPageOffset = (0 << 24) | 0;
 
@@ -2305,6 +2369,15 @@ void handleChapterList()
         // Jump to selected chapter
         activeChapterIdx = selectedChapterIdx;
         activeBookFilename = "[SD]" + bookChapters[activeChapterIdx].filename;
+        if (bookChapters[activeChapterIdx].size == 0)
+        {
+            FsFile chapFile = StorageManager::getInstance().openSDBook(bookChapters[activeChapterIdx].filename, O_RDONLY);
+            if (chapFile)
+            {
+                bookChapters[activeChapterIdx].size = chapFile.size();
+                chapFile.close();
+            }
+        }
         activeBookSize = bookChapters[activeChapterIdx].size;
 
         currentPageOffset = (activeChapterIdx << 24) | 0;

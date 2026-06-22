@@ -58,51 +58,24 @@ void ButtonManager::begin() {
     bool nextWakeup = checkAndClearLatch(nextPinNum);
     bool selectWakeup = checkAndClearLatch(selectPinNum);
 
-    // Load isFlipped setting from settings file if it exists
-    bool isFlipped = false;
-    if (InternalFS.exists("/settings.dat")) {
-        File file = InternalFS.open("/settings.dat", FILE_O_READ);
-        if (file) {
-            if (file.available()) file.readStringUntil('\n'); // skip FontType
-            if (file.available()) file.readStringUntil('\n'); // skip FontSize
-            if (file.available()) {
-                String flipStr = file.readStringUntil('\n');
-                flipStr.trim();
-                if (flipStr.length() > 0) {
-                    isFlipped = (flipStr.toInt() == 1);
-                }
-            }
-            file.close();
-        }
-    }
+
 
     // If a button woke the board, inject a press and initialize the button's
     // state as already pressed to prevent double-clicking on release.
     if (prevWakeup) {
         Serial.println("[Button Debug] Wakeup triggered by PREV button.");
-        if (isFlipped) {
-            _nextBtn.event = BTN_CLICK;
-        } else {
-            _prevBtn.event = BTN_CLICK;
-        }
         _prevBtn.lastPhysicalState = LOW;
         _prevBtn.debouncedState = LOW;
         _prevBtn.isLongPressed = true;
     }
     if (nextWakeup) {
         Serial.println("[Button Debug] Wakeup triggered by NEXT button.");
-        if (isFlipped) {
-            _prevBtn.event = BTN_CLICK;
-        } else {
-            _nextBtn.event = BTN_CLICK;
-        }
         _nextBtn.lastPhysicalState = LOW;
         _nextBtn.debouncedState = LOW;
         _nextBtn.isLongPressed = true;
     }
     if (selectWakeup) {
         Serial.println("[Button Debug] Wakeup triggered by SELECT button.");
-        _selectBtn.event = BTN_CLICK;
         _selectBtn.lastPhysicalState = LOW;
         _selectBtn.debouncedState = LOW;
         _selectBtn.isLongPressed = true;
