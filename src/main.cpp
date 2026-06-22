@@ -92,6 +92,10 @@ String chapterMenuOptions[MAX_CHAPTERS];
 bool restoringSleepState = false;
 bool wakeupFromSleep = false;
 
+#if !ENABLE_SERIAL_LOGGING
+StubSerialClass dummySerial;
+#endif
+
 
 // Font Settings submenu variables
 String fontMenuOptions[6];
@@ -236,6 +240,7 @@ void setup()
     uint32_t bootGpregret = NRF_POWER->GPREGRET;
     wakeupFromSleep = (bootGpregret == 0x55);
     NRF_POWER->GPREGRET = 0; // Clear register
+    restoringSleepState = wakeupFromSleep;
 
     uint32_t t0 = millis();
 
@@ -501,10 +506,12 @@ void setup()
         // Default to main menu
         transitionTo(STATE_MENU);
     }
+    restoringSleepState = false;
 }
 
 void loop()
 {
+    restoringSleepState = false;
     // BLE disabled — BLE stack is not initialized, so skip update.
     // BleManager::getInstance().update();
 

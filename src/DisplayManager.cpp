@@ -27,6 +27,8 @@
 using namespace Adafruit_LittleFS_Namespace;
 using LfsFile = Adafruit_LittleFS_Namespace::File;
 
+extern bool restoringSleepState;
+
 // GxEPD2_BW keeps the framebuffer as a private member. We can use the
 // GxEPD2-supplied public accessors (if present) or take a different approach:
 // since this file instantiates the global `epd` object, we declare a thin
@@ -128,7 +130,7 @@ void DisplayManager::begin() {
     epd.epd2._rst = -1; // Temp disable reset pin to bypass hardware reset pulse
   }
 
-  epd.init(115200, !_isWakeupFromSleep, 1,
+  epd.init(ENABLE_SERIAL_LOGGING ? 115200 : 0, !_isWakeupFromSleep, 1,
            false); // SPI init (initial=false on sleep wakeup to bypass forced
                    // full refresh)
 
@@ -175,7 +177,7 @@ void DisplayManager::powerUp() {
     digitalWrite(EPD_RST, HIGH);
     epd.epd2._rst = -1; // Temp disable reset pin to bypass hardware reset pulse
 
-    epd.init(115200, false, 1, false);
+    epd.init(ENABLE_SERIAL_LOGGING ? 115200 : 0, false, 1, false);
 
     epd.epd2._rst = savedRst; // Restore reset pin
     epd.setRotation(_isFlipped ? 3 : 1);
@@ -767,6 +769,9 @@ void ProgressView::render(Adafruit_GFX& display) {
 
 void DisplayManager::draw(UIView& view) {
   view.prepare();
+  if (restoringSleepState) {
+    return;
+  }
   powerUp();
   bool forceFull = view.prefersFullRefresh() || EPAPER_3COLOR;
   if (!forceFull) {

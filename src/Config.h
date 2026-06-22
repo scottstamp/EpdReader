@@ -53,13 +53,44 @@
 
 // --- System Auto-Sleep Timeout ---
 #define AUTO_SLEEP_MS                                                          \
-  240000 // 2 minutes of inactivity before deep sleep (system-off/light-sleep)
-  // 15000 // 15 seconds of inactivity before deep sleep (system-off/light-sleep)
+  15000 // 15 seconds of inactivity before deep sleep (system-off/light-sleep)
+  // 240000 // 2 minutes of inactivity before deep sleep (system-off/light-sleep)
 
 // --- USB Serial Sleep Block ---
 // When true, the device will NOT enter deep sleep while a USB Serial console
 // is open (useful for live debugging without the device powering down on you).
 // Set to false if you want the device to auto-sleep even with the Serial monitor attached.
 #define ENABLE_USB_SLEEP_BLOCK false
+
+// --- Serial Logging Control ---
+// Set to false to completely stub out Serial logs for faster boot times
+#define ENABLE_SERIAL_LOGGING false
+
+#if !ENABLE_SERIAL_LOGGING
+#include <Arduino.h>
+class StubSerialClass : public Print {
+public:
+    inline void begin(unsigned long) {}
+    inline void end() {}
+    inline int available() { return 0; }
+    inline int read() { return -1; }
+    inline void flush() {}
+    inline size_t readBytes(uint8_t* buffer, size_t length) { (void)buffer; (void)length; return 0; }
+    inline size_t readBytes(char* buffer, size_t length) { (void)buffer; (void)length; return 0; }
+    inline String readStringUntil(char c) { (void)c; return ""; }
+    inline operator bool() { return true; }
+    inline size_t write(uint8_t val) override { (void)val; return 1; }
+    inline size_t write(const uint8_t* buffer, size_t size) override { (void)buffer; return size; }
+    
+    template <typename T> inline size_t print(T val) { (void)val; return 0; }
+    template <typename T, typename U> inline size_t print(T val, U format) { (void)val; (void)format; return 0; }
+    template <typename T> inline size_t println(T val) { (void)val; return 0; }
+    template <typename T, typename U> inline size_t println(T val, U format) { (void)val; (void)format; return 0; }
+    inline size_t println() { return 0; }
+};
+
+extern StubSerialClass dummySerial;
+#define Serial dummySerial
+#endif
 
 #endif // CONFIG_H
