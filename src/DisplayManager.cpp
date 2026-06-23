@@ -106,7 +106,7 @@ DisplayManager &DisplayManager::getInstance() {
 }
 
 DisplayManager::DisplayManager()
-    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _lineSpacing(SPACING_NORMAL), _contrastMode(CONTRAST_NORMAL), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false), _currentChapterTitle(""), _currentChapterSize(0), _batteryHistoryIndex(0), _batteryHistoryInitialized(false) {
+    : _fontType(FONT_SANS), _fontSize(SIZE_MEDIUM), _lineSpacing(SPACING_NORMAL), _contrastMode(CONTRAST_NORMAL), _isFlipped(false), _isWakeupFromSleep(false), _nextPageOffset(0), _displayNeedsReinit(false), _forceNextFullRefresh(false), _currentChapterTitle(""), _currentChapterSize(0), _batteryHistoryIndex(0), _batteryHistoryInitialized(false) {
   clearHistory();
 }
 
@@ -608,11 +608,15 @@ void ReaderView::render(Adafruit_GFX& display) {
 }
 
 bool ReaderView::prefersFullRefresh() {
+  // One-shot: if the reader menu requested a manual full refresh, honour it.
+  if (DisplayManager::getInstance().consumeForceFullRefresh()) {
+    return true;
+  }
   static int pageTurnCount = -1;
   if (pageTurnCount == -1) {
     pageTurnCount = DisplayManager::getInstance().isWakeupFromSleep() ? 1 : 0;
   }
-  bool forceFull = (pageTurnCount % 6 == 0);
+  bool forceFull = (pageTurnCount % EPD_FULL_REFRESH_INTERVAL == 0);
   pageTurnCount++;
   return forceFull;
 }
@@ -774,7 +778,9 @@ void DisplayManager::draw(UIView& view) {
   }
   powerUp();
   bool forceFull = view.prefersFullRefresh() || EPAPER_3COLOR;
-  if (!forceFull) {
+  if (forceFull) {
+    epd.setFullWindow();
+  } else {
     epd.setPartialWindow(0, 0, epd.width(), epd.height());
   }
   epd.firstPage();

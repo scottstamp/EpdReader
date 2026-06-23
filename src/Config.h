@@ -30,6 +30,7 @@
 #define EPAPER_3COLOR                                                          \
   false // Set to false to run the 3-color panel in ultra-fast B&W mode with bypassed Red RAM
 #define DISPLAY_ROTATION 1 // 1 = Landscape (416x240), 3 = Inverted Landscape
+#define EPD_FULL_REFRESH_INTERVAL 20 // Do a full refresh every N page turns to clear ghosting
 
 // --- Storage & Paging Engine Settings ---
 #define MAX_BOOKS 10    // Maximum books stored in flash
@@ -53,8 +54,8 @@
 
 // --- System Auto-Sleep Timeout ---
 #define AUTO_SLEEP_MS                                                          \
-  15000 // 15 seconds of inactivity before deep sleep (system-off/light-sleep)
-  // 240000 // 2 minutes of inactivity before deep sleep (system-off/light-sleep)
+  300000 // 5 minutes of inactivity before deep sleep (system-off/light-sleep)
+  // 15000 // 15 seconds of inactivity before deep sleep (system-off/light-sleep)
 
 // --- USB Serial Sleep Block ---
 // When true, the device will NOT enter deep sleep while a USB Serial console

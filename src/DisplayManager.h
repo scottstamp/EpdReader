@@ -129,6 +129,15 @@ public:
     void setWakeupFromSleep(bool wakeup) { _isWakeupFromSleep = wakeup; }
     void checkAndTriggerPreFetch(const String& filename);
 
+    // One-shot flag: forces the next ReaderView draw to be a full refresh.
+    // Set by the reader menu "Full Refresh Display" action to clear ghosting.
+    void requestFullRefresh() { _forceNextFullRefresh = true; }
+    bool consumeForceFullRefresh() {
+        bool v = _forceNextFullRefresh;
+        _forceNextFullRefresh = false;
+        return v;
+    }
+
     bool getDisplayNeedsReinit() const { return _displayNeedsReinit; }
     void setDisplayNeedsReinit(bool needs) { _displayNeedsReinit = needs; }
 
@@ -169,6 +178,9 @@ private:
     bool _isWakeupFromSleep;
     uint32_t _nextPageOffset;
     bool _displayNeedsReinit;
+
+    // One-shot flag for manual full refresh from reader menu
+    bool _forceNextFullRefresh;
 
     // Chapter metadata for rendering
     String _currentChapterTitle;

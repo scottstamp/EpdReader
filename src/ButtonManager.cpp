@@ -1,10 +1,7 @@
 #include "ButtonManager.h"
 #include "Config.h"
 #include "DisplayManager.h"
-#include <Adafruit_LittleFS.h>
-#include <InternalFileSystem.h>
-
-using namespace Adafruit_LittleFS_Namespace;
+#include "StorageManager.h"
 
 #define DEBOUNCE_DELAY_MS   30
 #define LONG_PRESS_DELAY_MS 800
@@ -57,22 +54,12 @@ void ButtonManager::begin() {
     bool prevWakeup = checkAndClearLatch(prevPinNum);
     bool nextWakeup = checkAndClearLatch(nextPinNum);
     bool selectWakeup = checkAndClearLatch(selectPinNum);
-    // Load isFlipped setting from settings file if it exists
+    // Load isFlipped setting from the SD settings file so the wakeup button
+    // injection correctly respects the display orientation.
     bool isFlipped = false;
-    if (InternalFS.exists("/settings.dat")) {
-        File file = InternalFS.open("/settings.dat", FILE_O_READ);
-        if (file) {
-            if (file.available()) file.readStringUntil('\n'); // skip FontType
-            if (file.available()) file.readStringUntil('\n'); // skip FontSize
-            if (file.available()) {
-                String flipStr = file.readStringUntil('\n');
-                flipStr.trim();
-                if (flipStr.length() > 0) {
-                    isFlipped = (flipStr.toInt() == 1);
-                }
-            }
-            file.close();
-        }
+    {
+        int fontType = 0, fontSize = 1, lineSpacing = 1, contrastMode = 0;
+        StorageManager::getInstance().readSettings(fontType, fontSize, isFlipped, lineSpacing, contrastMode);
     }
 
     // If a button woke the board, inject a press and initialize the button's
