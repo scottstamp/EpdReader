@@ -437,6 +437,40 @@ def parse_toc_parts(toc_nav):
 
     return None, "No chapterized parts found in table of contents"
 
+def find_cover_image(z, opf_root, opf_path):
+    # Method 1: Check manifest for properties="cover-image" (EPUB 3)
+    manifest = opf_root.find('.//{http://www.idpf.org/2007/opf}manifest')
+    if manifest is not None:
+        for item in manifest:
+            props = item.attrib.get('properties', '')
+            if 'cover-image' in props.split():
+                href = item.attrib.get('href')
+                if href:
+                    return resolve_zip_path(opf_path, href)
+                    
+    # Method 2: Check meta name="cover" (EPUB 2)
+    metadata = opf_root.find('.//{http://www.idpf.org/2007/opf}metadata')
+    if metadata is not None:
+        cover_id = None
+        for meta in metadata.findall('.//{http://www.idpf.org/2007/opf}meta'):
+            if meta.attrib.get('name') == 'cover':
+                cover_id = meta.attrib.get('content')
+                break
+        if cover_id and manifest is not None:
+            for item in manifest:
+                if item.attrib.get('id') == cover_id:
+                    href = item.attrib.get('href')
+                    if href:
+                        return resolve_zip_path(opf_path, href)
+
+    # Method 3: Scan zip filenames for cover-like names
+    cover_re = re.compile(r'.*cover.*\.(?:jpe?g|png|webp|gif|bmp)', re.IGNORECASE)
+    for name in z.namelist():
+        if cover_re.match(os.path.basename(name)):
+            return name
+            
+    return None
+
 def convert_ebook(input_path, output_dir):
     """Convert an ebook (epub, azw3, or mobi) to plain-text chapter files.
 
@@ -542,6 +576,45 @@ def convert_epub(epub_path, output_dir):
             
         nav_zip_path = resolve_zip_path(opf_path, nav_href)
         print(f"Found navigation document path: {nav_zip_path}")
+
+        # Extract and convert cover art if found
+        cover_zip_path = find_cover_image(z, opf_root, opf_path)
+        if cover_zip_path:
+            print(f"Found cover art image inside EPUB: {cover_zip_path}")
+            try:
+                import io
+                from PIL import Image
+                
+                img_data = z.read(cover_zip_path)
+                img = Image.open(io.BytesIO(img_data))
+                
+                try:
+                    resample = Image.Resampling.LANCZOS
+                except AttributeError:
+                    resample = Image.ANTIALIAS
+                
+                img = img.resize((240, 416), resample)
+                img = img.convert('1')
+                
+                mono_bytes = bytearray()
+                for y in range(416):
+                    current_byte = 0
+                    for x in range(240):
+                        val = img.getpixel((x, y))
+                        bit = 1 if val == 0 else 0
+                        current_byte = (current_byte << 1) | bit
+                        if (x + 1) % 8 == 0:
+                            mono_bytes.append(current_byte)
+                            current_byte = 0
+                            
+                cover_out_path = os.path.join(output_dir, 'cover.mono')
+                with open(cover_out_path, 'wb') as f:
+                    f.write(mono_bytes)
+                print(f"  Wrote cover art to cover.mono ({len(mono_bytes)} bytes)")
+            except Exception as e:
+                print(f"  Warning: failed to convert cover art: {e}")
+        else:
+            print("No cover art image found inside EPUB.")
         
         # 3. Parse navigation document (EPUB 3 nav or EPUB 2 NCX)
         try:

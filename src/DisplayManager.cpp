@@ -44,6 +44,8 @@ extern bool restoringSleepState;
 GxEPD2_BW<GxEPD2_370_GDEY037T03, GxEPD2_370_GDEY037T03::HEIGHT>
     epd(GxEPD2_370_GDEY037T03(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
+bool useSlowFullRefresh = false;
+
 static uint16_t getTextWidth(const char* str, const GFXfont* font) {
   if (!str || !font) return 0;
   uint16_t w = 0;
@@ -163,6 +165,10 @@ void DisplayManager::clear() {
 void DisplayManager::powerDown() { epd.powerOff(); }
 
 void DisplayManager::powerUp() {
+  // Disable SD card SPI to release shared MISO pin
+  extern SPIClass SPI2;
+  SPI2.end();
+
   // Ensure SPI is configured and enabled for the display, as other
   // shared-bus devices (like the SD card) might have altered pin states.
   SPI.setPins(EPD_MISO, EPD_SCK, EPD_MOSI);
@@ -1056,4 +1062,114 @@ void DisplayManager::drawBattery(Adafruit_GFX& display) {
   // Use grayscale renderer for battery % text; use _isFullRefresh for antialiasing mode
   // drawGrayscaleString(display, textX, batteryY + 9, pctStr.c_str(),
                       // &AmazonEmber_Medium9pt7b, _isFullRefresh);
+}
+
+// LockscreenView implementation
+static uint8_t s_lockscreenCoverBuffer[12480];
+
+LockscreenView::LockscreenView(const String& title, const String& author, const String& chapter,
+                               const String& page, const String& coverPath, int pressCount)
+    : _title(title), _author(author), _chapter(chapter), _page(page),
+      _coverPath(coverPath), _pressCount(pressCount), _isFirstDraw(true), _coverLoaded(false) {}
+
+void LockscreenView::prepare() {
+  _coverLoaded = false;
+  if (_coverPath.length() > 0) {
+    FsFile file = StorageManager::getInstance().openSDBook(_coverPath, O_RDONLY);
+    if (file) {
+      if (file.read(s_lockscreenCoverBuffer, 12480) == 12480) {
+        _coverLoaded = true;
+      }
+      file.close();
+    }
+  }
+}
+
+bool LockscreenView::prefersFullRefresh() {
+  return true;
+}
+
+void LockscreenView::render(Adafruit_GFX& display) {
+  uint16_t inkColor = DisplayManager::getInstance().getInkColor();
+  uint16_t paperColor = DisplayManager::getInstance().getPaperColor();
+
+  // Temporarily set display rotation to portrait
+  uint8_t originalRotation = display.getRotation();
+  display.setRotation(DisplayManager::getInstance().isFlipped() ? 2 : 0);
+
+  display.fillScreen(paperColor);
+
+  // Draw full-screen vertical cover art (240x416)
+  if (_coverLoaded) {
+    display.drawBitmap(0, 0, s_lockscreenCoverBuffer, 240, 416, inkColor, paperColor);
+  } else {
+    // Draw Placeholder Box
+    display.drawRect(5, 5, 230, 406, inkColor);
+    display.drawRect(8, 8, 224, 400, inkColor);
+    
+    display.setFont(&AmazonEmber_Medium9pt7b);
+    display.setTextColor(inkColor);
+    
+    display.setCursor(65, 180);
+    display.print("NO COVER (240x416)");
+    
+    int bookX = 100;
+    int bookY = 210;
+    display.drawRect(bookX, bookY, 40, 50, inkColor);
+    display.drawRect(bookX + 4, bookY + 4, 32, 42, inkColor);
+  }
+
+  // Restore landscape rotation
+  display.setRotation(originalRotation);
+
+  /* Commented out old horizontal layout displaying metadata
+  // 2. Draw Metadata on the Right
+  display.setTextColor(inkColor);
+
+  String displayTitle = _title;
+  if (displayTitle.length() > 20) {
+    displayTitle = displayTitle.substring(0, 17) + "...";
+  }
+
+  String displayAuthor = _author;
+  if (displayAuthor.length() > 22) {
+    displayAuthor = displayAuthor.substring(0, 19) + "...";
+  }
+
+  String displayChapter = _chapter;
+  if (displayChapter.length() > 22) {
+    displayChapter = displayChapter.substring(0, 19) + "...";
+  }
+
+  display.setFont(&AmazonEmber_Medium12pt7b);
+  display.setCursor(180, 35);
+  display.print(displayTitle.c_str());
+
+  display.setFont(&AmazonEmber_Medium9pt7b);
+  display.setCursor(180, 65);
+  display.print("By: ");
+  display.print(displayAuthor.c_str());
+
+  display.setCursor(180, 100);
+  display.print("Chapter: ");
+  display.print(displayChapter.c_str());
+
+  display.setCursor(180, 135);
+  display.print("Progress: ");
+  display.print(_page.c_str());
+
+  display.drawFastHLine(180, 165, display.width() - 180 - 15, inkColor);
+
+  display.setFont(&AmazonEmber_Medium12pt7b);
+  display.setCursor(180, 200);
+  if (_pressCount == 0) {
+    display.print("Press SELECT 3x to unlock");
+  } else if (_pressCount == 1) {
+    display.print("Press SELECT 2 more times");
+  } else if (_pressCount == 2) {
+    display.print("Press SELECT 1 more time");
+  } else {
+    display.print("Unlocking...");
+  }
+  */
 }

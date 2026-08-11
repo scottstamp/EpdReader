@@ -6,8 +6,8 @@
 #include <SPI.h>
 #include <Adafruit_TinyUSB.h>
 
-// Instantiate dedicated hardware SPI port for the SD Card
-SPIClass SPI2(NRF_SPIM2, SD_MISO, SD_SCK, SD_MOSI);
+// Instantiate dedicated hardware SPI port for the SD Card (using NRF_SPIM3 for high speed)
+SPIClass SPI2(NRF_SPIM3, SD_MISO, SD_SCK, SD_MOSI);
 
 Adafruit_USBD_MSC usb_msc;
 
@@ -713,6 +713,9 @@ void StorageManager::powerCyclePeripherals() {
 }
 
 bool StorageManager::beginSD() {
+    // Disable EPD SPI to release shared MISO pin
+    SPI.end();
+
     // Ensure display CS is deasserted (HIGH)
     pinMode(EPD_CS, OUTPUT);
     digitalWrite(EPD_CS, HIGH);
@@ -754,8 +757,16 @@ bool StorageManager::beginSD() {
     
     Serial.println("[SD Debug] Initializing SD Card...");
 
-    // Initialize SdFat using SdSpiConfig at 16 MHz clock speed.
+    // Initialize SdFat using SdSpiConfig at 32 MHz clock speed (max SPIM3 speed).
     // By passing USER_SPI_BEGIN, we prevent SdFat from calling SPI.begin() internally.
+    if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(32), &SPI2))) {
+        _sdInitialized = true;
+        Serial.println("[SD Debug] SD Card initialized successfully at 32 MHz.");
+        return true;
+    }
+    
+    // Fallback: try lower speed (16 MHz)
+    Serial.println("[SD Debug] 32 MHz failed, retrying at 16 MHz...");
     if (sd.begin(SdSpiConfig(SD_CS, USER_SPI_BEGIN, SD_SCK_MHZ(16), &SPI2))) {
         _sdInitialized = true;
         Serial.println("[SD Debug] SD Card initialized successfully at 16 MHz.");

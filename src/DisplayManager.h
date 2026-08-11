@@ -66,6 +66,24 @@ private:
     int _percentage;
 };
 
+class LockscreenView : public UIView {
+public:
+    LockscreenView(const String& title, const String& author, const String& chapter,
+                   const String& page, const String& coverPath, int pressCount);
+    void prepare() override;
+    void render(Adafruit_GFX& display) override;
+    bool prefersFullRefresh() override;
+private:
+    String _title;
+    String _author;
+    String _chapter;
+    String _page;
+    String _coverPath;
+    int _pressCount;
+    bool _isFirstDraw;
+    bool _coverLoaded;
+};
+
 class DisplayManager {
 public:
     static DisplayManager& getInstance();

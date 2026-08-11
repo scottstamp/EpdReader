@@ -1,0 +1,53 @@
+diff --git a/.pio/libdeps/nicenano/GxEPD2/src/GxEPD2_EPD.cpp b/.pio/libdeps/nicenano/GxEPD2/src/GxEPD2_EPD.cpp
+index 28df8ad..3cd48ef 100644
+--- a/.pio/libdeps/nicenano/GxEPD2/src/GxEPD2_EPD.cpp
++++ b/.pio/libdeps/nicenano/GxEPD2/src/GxEPD2_EPD.cpp
+@@ -140,11 +140,17 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
+ {
+   if (_busy >= 0)
+   {
+-    delay(1); // add some margin to become active
++    delay(10); // add some margin to become active
+     unsigned long start = micros();
+     while (1)
+     {
+-      if (digitalRead(_busy) != _busy_level) break;
++      if (digitalRead(_busy) != _busy_level) {
++        delay(20); // wait and check again to filter out EMI noise
++        if (digitalRead(_busy) != _busy_level) break;
++      }
+       if (_busy_callback) _busy_callback(_busy_callback_parameter);
+       else delay(1);
++      if (digitalRead(_busy) != _busy_level) {
++        delay(20); // wait and check again to filter out EMI noise
++        if (digitalRead(_busy) != _busy_level) break;
++      }
+       if (micros() - start > _busy_timeout)
+       {
+         Serial.println("Busy Timeout!");
+diff --git a/.pio/libdeps/nicenano/GxEPD2/src/gdey/GxEPD2_370_GDEY037T03.cpp b/.pio/libdeps/nicenano/GxEPD2/src/gdey/GxEPD2_370_GDEY037T03.cpp
+index e78abdc..2cd48ef 100644
+--- a/.pio/libdeps/nicenano/GxEPD2/src/gdey/GxEPD2_370_GDEY037T03.cpp
++++ b/.pio/libdeps/nicenano/GxEPD2/src/gdey/GxEPD2_370_GDEY037T03.cpp
+@@ -362,9 +362,11 @@ void GxEPD2_370_GDEY037T03::_InitDisplay()
+   _init_display_done = true;
+ }
+ 
++extern bool useSlowFullRefresh;
++
+ void GxEPD2_370_GDEY037T03::_Update_Full()
+ {
+-  if (useFastFullUpdate)
++  if (useFastFullUpdate && !useSlowFullRefresh)
+   {
+     _writeCommand(0xE0); // Cascade Setting (CCSET)
+     _writeData(0x02);    // TSFIX
+@@ -377,7 +377,7 @@ void GxEPD2_370_GDEY037T03::_Update_Full()
+   _writeCommand(0x12); //display refresh
+   _waitWhileBusy("_Update_Full", full_refresh_time);
+   _PowerOff();
+-  if (useFastFullUpdate) _InitDisplay(); // undo TSFIX
++  if (useFastFullUpdate && !useSlowFullRefresh) _InitDisplay(); // undo TSFIX
+ }
+ 
+ void GxEPD2_370_GDEY037T03::_Update_Part()

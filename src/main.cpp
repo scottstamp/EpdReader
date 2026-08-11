@@ -24,7 +24,8 @@ enum SystemState {
   STATE_USB_MSC,
   STATE_CHAPTER_LIST,
   STATE_FONT_SETTINGS,
-  STATE_STATS
+  STATE_STATS,
+  STATE_LOCKSCREEN
 };
 
 SystemState currentState = STATE_BOOT;
@@ -81,7 +82,7 @@ int bleBytesReceived = 0;
 bool bleUploadFinished = false;
 
 // Reader Menu variables
-String readerMenuOptions[9];
+String readerMenuOptions[10];
 int readerMenuCount = 7;
 int selectedReaderMenuIdx = 0;
 int selectedChapterIdx = 0;
@@ -122,6 +123,11 @@ void bleProgressCallback(const String &status, int bytesReceived,
 void handleUsbMsc();
 void handleFontSettings();
 void handleStats();
+void handleLockscreen();
+void drawLockscreen();
+
+extern bool useSlowFullRefresh;
+int lockUnlockPressCount = 0;
 void drawFontSettingsMenu();
 void accumulateSessionTime();
 uint32_t currentSessionSecondsLive();
@@ -140,6 +146,72 @@ String getBookTitleFromPath(const String &path) {
     name = name.substring(lastSlash + 1);
   name.replace("_", " ");
   return name;
+}
+
+String getCoverArtPath(const String& filename) {
+  if (!filename.startsWith("[SD]")) {
+    return "";
+  }
+  String path = filename.substring(4); // Remove [SD]
+  int lastSlash = path.lastIndexOf('/');
+  if (lastSlash >= 0) {
+    // Chapterized book, folder is path.substring(0, lastSlash + 1)
+    String folder = path.substring(0, lastSlash + 1);
+    return "/" + folder + "cover.mono";
+  } else {
+    // Flat book file, e.g. "The_Compound.txt"
+    String baseName = path;
+    if (baseName.endsWith(".txt")) {
+      baseName = baseName.substring(0, baseName.length() - 4);
+    }
+    // Check if /BaseName/cover.mono exists
+    String opt1 = "/" + baseName + "/cover.mono";
+    if (StorageManager::getInstance().sdExists(opt1)) {
+      return opt1;
+    }
+    // Otherwise try /BaseName.mono
+    return "/" + baseName + ".mono";
+  }
+}
+
+void parseTitleAndAuthor(const String& fullTitle, String& title, String& author) {
+  int hyphenIdx = fullTitle.indexOf(" - ");
+  if (hyphenIdx >= 0) {
+    title = fullTitle.substring(0, hyphenIdx);
+    author = fullTitle.substring(hyphenIdx + 3);
+  } else {
+    title = fullTitle;
+    author = "Unknown Author";
+  }
+  title.trim();
+  author.trim();
+}
+
+void drawLockscreen() {
+  String title = "";
+  String author = "";
+  parseTitleAndAuthor(activeBookTitle, title, author);
+
+  String chapter = "—";
+  if (isActiveBookChapterized) {
+    chapter = bookChapters[activeChapterIdx].title;
+  }
+
+  // Calculate current page/percentage
+  int percent = 0;
+  uint32_t fileOffset = currentPageOffset;
+  if (isActiveBookChapterized) {
+    fileOffset = currentPageOffset & 0x00FFFFFF;
+  }
+  uint32_t totalSize = activeBookSize > 0 ? activeBookSize : 1;
+  percent = (fileOffset * 100) / totalSize;
+  String pageStr = String(percent) + "%";
+
+  // Get cover art path
+  String coverPath = getCoverArtPath(activeBookFilename);
+
+  LockscreenView lockView(title, author, chapter, pageStr, coverPath, lockUnlockPressCount);
+  DisplayManager::getInstance().draw(lockView);
 }
 
 bool loadBookChapters(const String &bookPath) {
@@ -302,6 +374,7 @@ void setup() {
   // Check if we have a saved sleep state (now on SD)
   uint32_t t_before_sleep = millis();
   bool restoredFromSleepState = false;
+  bool restoreToLockscreen = false;
   int savedState = 0, savedMenuIdx = 0, savedBookIdx = 0, savedSdBookIdx = 0;
   int savedPcBookIdx = 0, savedChapterIdx = 0, savedReaderMenuIdx = 0,
       savedActiveChapterIdx = 0;
@@ -312,6 +385,11 @@ void setup() {
           savedActiveChapterIdx)) {
     // Clear it so it's a one-time restore
     StorageManager::getInstance().clearSleepState();
+
+    if (savedState == STATE_LOCKSCREEN) {
+      restoreToLockscreen = true;
+      savedState = STATE_READER;
+    }
 
     if (savedState == STATE_MENU || savedState == STATE_BOOK_LIST ||
         savedState == STATE_SD_BROWSE || savedState == STATE_PC_BROWSE ||
@@ -427,7 +505,7 @@ void setup() {
               // is a no-op if currentPageOffset is already the last entry.
               DisplayManager::getInstance().pushHistory(currentPageOffset);
 
-              transitionTo(STATE_READER);
+              transitionTo(restoreToLockscreen ? STATE_LOCKSCREEN : STATE_READER);
               return;
             }
           }
@@ -455,7 +533,7 @@ void setup() {
           // Ensure current page is top of history stack for correct PREV nav.
           DisplayManager::getInstance().pushHistory(currentPageOffset);
 
-          transitionTo(STATE_READER);
+          transitionTo(restoreToLockscreen ? STATE_LOCKSCREEN : STATE_READER);
           return;
         }
       } else {
@@ -483,7 +561,7 @@ void setup() {
           // Ensure current page is top of history stack for correct PREV nav.
           DisplayManager::getInstance().pushHistory(currentPageOffset);
 
-          transitionTo(STATE_READER);
+          transitionTo(restoreToLockscreen ? STATE_LOCKSCREEN : STATE_READER);
           return;
         }
       }
@@ -542,6 +620,9 @@ void loop() {
   case STATE_STATS:
     handleStats();
     break;
+  case STATE_LOCKSCREEN:
+    handleLockscreen();
+    break;
   default:
     break;
   }
@@ -573,6 +654,7 @@ void loop() {
 }
 
 void transitionTo(SystemState newState) {
+  SystemState oldState = currentState;
   bool isInitialTransition = (currentState == STATE_BOOT);
 
   // Manage reading session: close any active session before leaving
@@ -752,6 +834,10 @@ void transitionTo(SystemState newState) {
     }
   } else if (newState == STATE_READER) {
     Serial.println("Transition to: STATE_READER");
+    if (oldState == STATE_LOCKSCREEN) {
+      DisplayManager::getInstance().requestFullRefresh();
+      useSlowFullRefresh = true;
+    }
     // Render current page
     if (isActiveBookChapterized) {
       uint32_t fileOffset = currentPageOffset & 0x00FFFFFF;
@@ -764,6 +850,7 @@ void transitionTo(SystemState newState) {
                         false, "", activeBookSize);
       DisplayManager::getInstance().draw(reader);
     }
+    useSlowFullRefresh = false;
   } else if (newState == STATE_BLE_UPLOAD) {
     Serial.println("Transition to: STATE_BLE_UPLOAD");
     bleStatusMsg = "Waiting for connection...";
@@ -786,6 +873,12 @@ void transitionTo(SystemState newState) {
       selectedReaderMenuIdx = 0;
     }
     drawReaderMenu();
+  } else if (newState == STATE_LOCKSCREEN) {
+    Serial.println("Transition to: STATE_LOCKSCREEN");
+    lockUnlockPressCount = 0;
+    useSlowFullRefresh = true;
+    drawLockscreen();
+    useSlowFullRefresh = false;
   } else if (newState == STATE_SD_BROWSE) {
     Serial.println("Transition to: STATE_SD_BROWSE");
     if (!restoringSleepState) {
@@ -1484,6 +1577,7 @@ void drawReaderMenu() {
       "Orientation: " +
       String(DisplayManager::getInstance().isFlipped() ? "Flipped" : "Normal");
   readerMenuOptions[idx++] = "Refresh Display";
+  readerMenuOptions[idx++] = "Lock Screen";
   readerMenuOptions[idx++] = "Exit to Main Menu";
 
   readerMenuCount = idx;
@@ -1583,11 +1677,30 @@ void handleReaderMenu() {
       DisplayManager::getInstance().requestFullRefresh();
       transitionTo(STATE_READER);
     } else if (selectedReaderMenuIdx == idx++) {
+      transitionTo(STATE_LOCKSCREEN);
+    } else if (selectedReaderMenuIdx == idx++) {
       transitionTo(STATE_MENU);
     }
   } else if (select == BTN_LONG_PRESS) {
     lastActivityTime = millis();
     transitionTo(STATE_READER);
+  }
+}
+
+void handleLockscreen() {
+  ButtonEvent prev = ButtonManager::getInstance().getPrevEvent();
+  ButtonEvent next = ButtonManager::getInstance().getNextEvent();
+  ButtonEvent select = ButtonManager::getInstance().getSelectEvent();
+
+  if (prev == BTN_CLICK || next == BTN_CLICK) {
+    lastActivityTime = millis();
+  } else if (select == BTN_CLICK) {
+    lastActivityTime = millis();
+    lockUnlockPressCount++;
+    if (lockUnlockPressCount >= 3) {
+      lockUnlockPressCount = 0;
+      transitionTo(STATE_READER);
+    }
   }
 }
 
