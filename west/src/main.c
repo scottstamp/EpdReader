@@ -98,15 +98,18 @@ static void render_current_state(void) {
             char page_buf[1024] = {0};
             uint32_t bytes_read = 0;
 
+            char display_title[64];
+            storage_get_book_display_title(active_book, display_title, sizeof(display_title));
+
             bool ok = storage_read_book_page(active_book, current_page_offset, page_buf, sizeof(page_buf), &bytes_read);
             if (!ok || bytes_read == 0) {
-                display_draw_message(active_book[0] ? active_book : "Reader Error", "Could not read book file!\nCheck SD card", true);
+                display_draw_message(display_title[0] ? display_title : "Reader Error", "Could not read book file!\nCheck SD card", true);
             } else {
                 uint32_t file_size = storage_get_book_size(active_book);
                 uint32_t progress_pct = (file_size > 0) ? ((current_page_offset * 100) / file_size) : 0;
                 if (progress_pct > 100) progress_pct = 100;
 
-                last_page_bytes_read = display_draw_reader_page(active_book, page_buf, progress_pct);
+                last_page_bytes_read = display_draw_reader_page(display_title, page_buf, progress_pct);
                 if (last_page_bytes_read == 0) last_page_bytes_read = 300;
             }
             break;
@@ -117,8 +120,11 @@ static void render_current_state(void) {
             uint32_t progress_pct = (file_size > 0) ? ((current_page_offset * 100) / file_size) : 0;
             if (progress_pct > 100) progress_pct = 100;
 
+            char display_title[64];
+            storage_get_book_display_title(active_book, display_title, sizeof(display_title));
+
             char header_str[64];
-            snprintf(header_str, sizeof(header_str), "%s (%u%%)", active_book[0] ? active_book : "Reader", progress_pct);
+            snprintf(header_str, sizeof(header_str), "%s (%u%%)", display_title[0] ? display_title : "Reader", progress_pct);
 
             char session_str[32];
             uint32_t session_sec = (session_start_ms > 0) ? ((k_uptime_get_32() - session_start_ms) / 1000) : 0;
@@ -291,6 +297,7 @@ int main(void) {
             case BTN_EVENT_SELECT_CLICK:
                 if (current_state == STATE_MENU) {
                     if (selected_menu_idx == 0) { // Bootloader Mode
+                        display_draw_message("Bootloader Mode", "Rebooting...", false);
                         reboot_to_bootloader();
                     } else if (selected_menu_idx == 1) { // Resume
                         if (active_book[0] != '\0') {

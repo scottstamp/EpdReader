@@ -19,6 +19,8 @@ typedef struct {
 
 typedef struct {
     char book_path[256];
+    char title[128];
+    char author[128];
     int chapter_count;
     int current_chapter_idx;
     uint32_t total_book_text_len;

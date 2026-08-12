@@ -266,6 +266,61 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
                         strstr(lower_name, "toc.ncx") != NULL || strstr(lower_name, "nav.xhtml") != NULL ||
                         strstr(lower_name, "cover") != NULL || strstr(lower_name, "next-reads") != NULL);
 
+        if ((strstr(lower_name, "content.opf") != NULL || strstr(lower_name, ".opf") != NULL) && uncomp_size > 0 && uncomp_size < 32768) {
+            char *opf_buf = k_malloc(uncomp_size + 1);
+            if (opf_buf) {
+                if (comp_method == 0) {
+                    fs_read(&file, opf_buf, uncomp_size);
+                    opf_buf[uncomp_size] = '\0';
+                } else if (comp_method == 8) {
+                    uint8_t *comp_buf = k_malloc(comp_size);
+                    if (comp_buf) {
+                        fs_read(&file, comp_buf, comp_size);
+                        unsigned long dest_len = uncomp_size;
+                        unsigned long src_len = comp_size;
+                        puff((unsigned char*)opf_buf, &dest_len, comp_buf, &src_len);
+                        opf_buf[dest_len] = '\0';
+                        k_free(comp_buf);
+                    }
+                }
+
+                // Extract <dc:title>
+                char *t_start = strstr(opf_buf, "<dc:title");
+                if (!t_start) t_start = strstr(opf_buf, "<title");
+                if (t_start) {
+                    char *t_end_tag = strchr(t_start, '>');
+                    if (t_end_tag) {
+                        char *t_close = strchr(t_end_tag + 1, '<');
+                        if (t_close && (t_close > t_end_tag + 1)) {
+                            size_t len = t_close - (t_end_tag + 1);
+                            if (len >= sizeof(book->title)) len = sizeof(book->title) - 1;
+                            strncpy(book->title, t_end_tag + 1, len);
+                            book->title[len] = '\0';
+                            LOG_INF("[EPUB Metadata] Title: %s", book->title);
+                        }
+                    }
+                }
+
+                // Extract <dc:creator>
+                char *c_start = strstr(opf_buf, "<dc:creator");
+                if (!c_start) c_start = strstr(opf_buf, "<creator");
+                if (c_start) {
+                    char *c_end_tag = strchr(c_start, '>');
+                    if (c_end_tag) {
+                        char *c_close = strchr(c_end_tag + 1, '<');
+                        if (c_close && (c_close > c_end_tag + 1)) {
+                            size_t len = c_close - (c_end_tag + 1);
+                            if (len >= sizeof(book->author)) len = sizeof(book->author) - 1;
+                            strncpy(book->author, c_end_tag + 1, len);
+                            book->author[len] = '\0';
+                            LOG_INF("[EPUB Metadata] Author: %s", book->author);
+                        }
+                    }
+                }
+                k_free(opf_buf);
+            }
+        }
+
         if (is_html && !is_nav && uncomp_size > 0) {
             EpubChapterInfo *ch = &book->chapters[book->chapter_count++];
             snprintf(ch->chapter_path, sizeof(ch->chapter_path), "%s", filename);

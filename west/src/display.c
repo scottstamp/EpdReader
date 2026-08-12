@@ -305,14 +305,20 @@ void display_draw_string(int x, int y, const char *str, uint8_t color) {
 }
 
 void display_draw_battery(int percent) {
-    int bx = EPD_WIDTH - 40;
+    int bx = EPD_WIDTH - 65;
     int by = 4;
-    display_draw_rect(bx, by, 28, 14, 0);
-    display_fill_rect(bx + 28, by + 4, 3, 6, 0);
-    int fill_w = (22 * percent) / 100;
+
+    display_draw_rect(bx, by, 26, 13, 0);
+    display_fill_rect(bx + 26, by + 4, 3, 5, 0);
+    int fill_w = (20 * percent) / 100;
     if (fill_w > 0) {
-        display_fill_rect(bx + 3, by + 3, fill_w, 8, 0);
+        display_fill_rect(bx + 3, by + 3, fill_w, 7, 0);
     }
+
+    // Draw percentage text on right side of battery icon, close to tip
+    char pct_str[16];
+    snprintf(pct_str, sizeof(pct_str), "%d%%", percent);
+    display_draw_gfx_string(bx + 32, by + 12, pct_str, &AmazonEmber_Medium9pt7b, 0);
 }
 
 void display_draw_menu(const char *title, const char *options[], int count, int selected_idx) {
@@ -322,13 +328,13 @@ void display_draw_menu(const char *title, const char *options[], int count, int 
 void display_draw_menu_ext(const char *title, const char *sub_footer, const char *options[], int count, int selected_idx) {
     display_clear_buffer();
 
-    // Header Title (Amazon Ember Medium 12pt) + Top Right Battery Icon
-    display_draw_gfx_string(10, 20, title, &AmazonEmber_Medium12pt7b, 0);
+    // Compact Top Bar Header
+    display_draw_gfx_string(10, 15, title, &AmazonEmber_Medium9pt7b, 0);
     display_draw_battery(battery_get_percentage());
-    display_fill_rect(0, 26, EPD_WIDTH, 2, 0);
+    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
 
     // Menu Item Rendering with Inverted Solid Black Background Box for Active Item
-    int start_y = 52;
+    int start_y = 44;
     int item_height = (count > 6) ? 22 : 26;
 
     for (int i = 0; i < count; i++) {
@@ -353,21 +359,22 @@ void display_draw_menu_ext(const char *title, const char *sub_footer, const char
 
 void display_draw_message(const char *title, const char *msg, bool is_alert) {
     display_clear_buffer();
-    display_draw_gfx_string(10, 20, title, &AmazonEmber_Medium12pt7b, 0);
+    display_draw_gfx_string(10, 15, title, &AmazonEmber_Medium9pt7b, 0);
     display_draw_battery(battery_get_percentage());
-    display_fill_rect(0, 26, EPD_WIDTH, 2, 0);
-    display_draw_gfx_string(10, 52, msg, &AmazonEmber_Medium12pt7b, 0);
+    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
+    display_draw_gfx_string(10, 44, msg, &AmazonEmber_Medium12pt7b, 0);
     display_update(false);
 }
 
 void display_draw_progress(const char *task, int percentage) {
     display_clear_buffer();
-    display_draw_gfx_string(10, 20, task, &AmazonEmber_Medium12pt7b, 0);
-    display_fill_rect(0, 26, EPD_WIDTH, 2, 0);
-    display_draw_rect(10, 50, EPD_WIDTH - 20, 16, 0);
+    display_draw_gfx_string(10, 15, task, &AmazonEmber_Medium9pt7b, 0);
+    display_draw_battery(battery_get_percentage());
+    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
+    display_draw_rect(10, 44, EPD_WIDTH - 20, 16, 0);
     int fill_w = ((EPD_WIDTH - 20) * percentage) / 100;
     if (fill_w > 0) {
-        display_fill_rect(10, 50, fill_w, 16, 0);
+        display_fill_rect(10, 44, fill_w, 16, 0);
     }
     display_update(false);
 }
@@ -390,17 +397,22 @@ void display_draw_lockscreen(const char *title, const char *author, const char *
 uint32_t display_draw_reader_page(const char *book_name, const char *text_page, uint32_t progress_pct) {
     display_clear_buffer();
 
+    // Header Title & Battery Icon on Top Bar
+    display_draw_gfx_string(10, 15, book_name, &AmazonEmber_Medium9pt7b, 0);
+    display_draw_battery(battery_get_percentage());
+    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
+
     const GFXfont *active_font = get_active_reader_font();
     int font_height = (g_font_size == SIZE_SMALL) ? 14 : 18;
     int line_height = font_height + ((g_line_spacing == SPACING_COMPACT) ? 4 : ((g_line_spacing == SPACING_RELAXED) ? 10 : 7));
 
-    int margin_top = 20;
-    int margin_bottom = EPD_HEIGHT - 12;
+    int margin_top = 41; // +3px top padding below header bar
+    int margin_bottom = EPD_HEIGHT - 6;
     int margin_left = 10;
     int max_width = EPD_WIDTH - 20;
 
     int cur_y = margin_top;
-    int max_y = margin_bottom - font_height;
+    int max_y = margin_bottom - font_height + 4;
 
     const char *p = text_page;
     const char *page_start = text_page;

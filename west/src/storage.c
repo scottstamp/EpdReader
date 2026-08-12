@@ -206,6 +206,75 @@ uint32_t storage_get_book_size(const char *book_name) {
     return 0;
 }
 
+bool storage_get_book_metadata(const char *book_name, char *title_out, size_t title_max, char *author_out, size_t author_max) {
+    if (!book_name || book_name[0] == '\0') return false;
+
+    if (title_out && title_max > 0) title_out[0] = '\0';
+    if (author_out && author_max > 0) author_out[0] = '\0';
+
+    char full_path[256];
+    resolve_book_path(book_name, full_path, sizeof(full_path));
+
+    if (ends_with_epub(book_name)) {
+        if (!s_epub_cached || strcmp(s_cached_epub_path, full_path) != 0) {
+            if (epub_scan_chapters(full_path, &s_cached_epub)) {
+                snprintf(s_cached_epub_path, sizeof(s_cached_epub_path), "%s", full_path);
+                s_epub_cached = true;
+            }
+        }
+        if (s_epub_cached) {
+            if (s_cached_epub.title[0] != '\0' && title_out) {
+                snprintf(title_out, title_max, "%s", s_cached_epub.title);
+            }
+            if (s_cached_epub.author[0] != '\0' && author_out) {
+                snprintf(author_out, author_max, "%s", s_cached_epub.author);
+            }
+        }
+    }
+
+    // Fallback: derive title from filename if empty
+    if (title_out && title_out[0] == '\0') {
+        const char *base = strrchr(book_name, '/');
+        base = base ? base + 1 : book_name;
+        snprintf(title_out, title_max, "%s", base);
+
+        // Strip extension
+        char *dot = strrchr(title_out, '.');
+        if (dot) *dot = '\0';
+
+        // Replace underscores/hyphens with spaces
+        for (int i = 0; title_out[i]; i++) {
+            if (title_out[i] == '_' || title_out[i] == '-') {
+                title_out[i] = ' ';
+            }
+        }
+    }
+    return true;
+}
+
+bool storage_get_book_display_title(const char *book_name, char *out_str, size_t max_len) {
+    if (!book_name || book_name[0] == '\0' || !out_str || max_len == 0) return false;
+
+    char title[128] = {0};
+    char author[128] = {0};
+    storage_get_book_metadata(book_name, title, sizeof(title), author, sizeof(author));
+
+    char formatted[256] = {0};
+    if (author[0] != '\0') {
+        snprintf(formatted, sizeof(formatted), "%s - %s", title, author);
+    } else {
+        snprintf(formatted, sizeof(formatted), "%s", title);
+    }
+
+    // Truncate to fit within top bar max length (e.g. 45 chars)
+    if (strlen(formatted) > 45) {
+        snprintf(out_str, max_len, "%.42s...", formatted);
+    } else {
+        snprintf(out_str, max_len, "%s", formatted);
+    }
+    return true;
+}
+
 bool storage_read_book_page(const char *book_name, uint32_t offset, char *page_buf, size_t buf_size, uint32_t *bytes_read) {
     *bytes_read = 0;
     if (!book_name || book_name[0] == '\0') return false;

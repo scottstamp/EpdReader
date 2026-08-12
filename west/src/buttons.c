@@ -24,12 +24,12 @@ static void button_isr(const struct device *dev, struct gpio_callback *cb, uint3
     if (pins & BIT(btn_prev.pin)) {
         if (now - last_prev_press_time >= 350) {
             last_prev_press_time = now;
-            pending_event = BTN_EVENT_PREV_CLICK;
+            pending_event = BTN_EVENT_NEXT_CLICK;
         }
     } else if (pins & BIT(btn_next.pin)) {
         if (now - last_next_press_time >= 350) {
             last_next_press_time = now;
-            pending_event = BTN_EVENT_NEXT_CLICK;
+            pending_event = BTN_EVENT_PREV_CLICK;
         }
     } else if (pins & BIT(btn_select.pin)) {
         if (now - last_select_press_time >= 350) {

@@ -9,6 +9,8 @@ void storage_dump_tree(void);
 // Book and File listing
 int storage_list_sd_books(char books[][64], int max_books);
 uint32_t storage_get_book_size(const char *book_name);
+bool storage_get_book_metadata(const char *book_name, char *title_out, size_t title_max, char *author_out, size_t author_max);
+bool storage_get_book_display_title(const char *book_name, char *out_str, size_t max_len);
 bool storage_read_book_page(const char *book_name, uint32_t offset, char *page_buf, size_t buf_size, uint32_t *bytes_read);
 
 bool storage_read_progress(char *book_name, uint32_t *offset);
