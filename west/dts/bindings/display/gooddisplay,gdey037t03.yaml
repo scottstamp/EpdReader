@@ -1,0 +1,41 @@
+description: Good Display GDEY037T03 3.7-inch e-Paper display controller (UC8253)
+
+compatible: "gooddisplay,gdey037t03"
+
+include: [display-controller.yaml]
+
+properties:
+  dc-gpios:
+    type: phandle-array
+    required: true
+    description: Data/Command control GPIO pin
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Hardware Reset GPIO pin
+
+  busy-gpios:
+    type: phandle-array
+    required: true
+    description: Hardware Busy status GPIO pin (Active LOW)
+
+  cs-gpios:
+    type: phandle-array
+    required: true
+    description: Chip Select GPIO pin
+
+  mosi-gpios:
+    type: phandle-array
+    required: true
+    description: SPI MOSI GPIO pin
+
+  sck-gpios:
+    type: phandle-array
+    required: true
+    description: SPI SCK GPIO pin
+
+  vcc-gpios:
+    type: phandle-array
+    required: false
+    description: Power rail control GPIO pin (Active LOW MOSFET)

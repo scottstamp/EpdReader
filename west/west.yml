@@ -1,0 +1,18 @@
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+    - name: nrfconnect
+      url-base: https://github.com/nrfconnect
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v3.5.0
+      import: true
+    - name: nrf
+      remote: nrfconnect
+      revision: v2.5.0
+
+  self:
+    path: app

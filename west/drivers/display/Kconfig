@@ -1,0 +1,7 @@
+menuconfig DISPLAY_GDEY037T03
+	bool "Good Display GDEY037T03 (UC8253) e-Paper display driver"
+	default y
+	depends on DT_HAS_GOODDISPLAY_GDEY037T03_ENABLED
+	select DISPLAY_HAS_PIXEL_FORMAT_MONO10
+	help
+	  Enable driver for Good Display GDEY037T03 3.7" e-Paper display (UC8253 controller).

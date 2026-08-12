@@ -1,0 +1,188 @@
+/ {
+    chosen {
+        zephyr,console = &board_cdc_acm_uart;
+        zephyr,shell-uart = &board_cdc_acm_uart;
+        zephyr,code-partition = &code_partition;
+    };
+
+    aliases {
+        display0 = &epd0;
+        epd-cs = &epd_cs_pin;
+        epd-dc = &epd_dc_pin;
+        epd-rst = &epd_rst_pin;
+        epd-busy = &epd_busy_pin;
+        epd-vcc = &epd_vcc_pin;
+
+        btn-prev = &button_prev;
+        btn-next = &button_next;
+        btn-select = &button_select;
+    };
+
+    epd0: gdey037t03 {
+        compatible = "gooddisplay,gdey037t03";
+        status = "okay";
+        height = <416>;
+        width = <240>;
+        cs-gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;
+        dc-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
+        reset-gpios = <&gpio0 17 GPIO_ACTIVE_LOW>;
+        busy-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
+        mosi-gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
+        sck-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+        vcc-gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
+    };
+
+    epd_pins {
+        compatible = "gpio-keys";
+        epd_cs_pin: epd_cs {
+            gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;
+            label = "EPD CS";
+        };
+        epd_dc_pin: epd_dc {
+            gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
+            label = "EPD DC";
+        };
+        epd_rst_pin: epd_rst {
+            gpios = <&gpio0 17 GPIO_ACTIVE_LOW>;
+            label = "EPD RST";
+        };
+        epd_busy_pin: epd_busy {
+            gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
+            label = "EPD BUSY";
+        };
+        epd_vcc_pin: epd_vcc {
+            gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
+            label = "EPD VCC MOSFET";
+        };
+    };
+
+    buttons {
+        compatible = "gpio-keys";
+        button_prev: button_prev {
+            gpios = <&gpio0 2 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+            label = "Prev Button (P0.02)";
+        };
+        button_next: button_next {
+            gpios = <&gpio0 24 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+            label = "Next Button (P0.24)";
+        };
+        button_select: button_select {
+            gpios = <&gpio0 22 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+            label = "Select Button (P0.22)";
+        };
+    };
+
+    vbatt {
+        compatible = "voltage-divider";
+        io-channels = <&adc 2>;
+        output-ohms = <1000000>;
+        full-ohms = <2000000>;
+    };
+};
+
+&uart0 {
+    status = "disabled";
+};
+
+&i2c0 {
+    status = "disabled";
+};
+
+&i2c1 {
+    status = "disabled";
+};
+
+&pwm0 {
+    status = "disabled";
+};
+
+&spi1 {
+    status = "disabled";
+};
+
+/delete-node/ &{/soc/flash-controller@4001e000/flash@0/partitions};
+
+&flash0 {
+    partitions {
+        compatible = "fixed-partitions";
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        boot_partition_mbr: partition@0 {
+            label = "MBR";
+            read-only;
+            reg = <0x00000000 0x00001000>;
+        };
+
+        code_partition: partition@1000 {
+            label = "Application";
+            reg = <0x00001000 0x000eb000>;
+        };
+
+        storage_partition: partition@ec000 {
+            label = "Storage";
+            reg = <0x000ec000 0x00008000>;
+        };
+
+        boot_partition: partition@f4000 {
+            label = "bootloader";
+            read-only;
+            reg = <0x000f4000 0x0000c000>;
+        };
+    };
+};
+
+&adc {
+    status = "okay";
+    #address-cells = <1>;
+    #size-cells = <0>;
+
+    channel@2 {
+        reg = <2>;
+        zephyr,gain = "ADC_GAIN_1_6";
+        zephyr,reference = "ADC_REF_INTERNAL";
+        zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+        zephyr,input-positive = <NRF_SAADC_AIN2>;
+        zephyr,resolution = <12>;
+    };
+};
+
+&spi2 {
+    compatible = "nordic,nrf-spim";
+    status = "okay";
+    pinctrl-0 = <&spi2_default>;
+    pinctrl-1 = <&spi2_sleep>;
+    pinctrl-names = "default", "sleep";
+    cs-gpios = <&gpio1 13 GPIO_ACTIVE_LOW>;
+
+    sdhc0: sdhc@0 {
+        compatible = "zephyr,sdhc-spi-slot";
+        reg = <0>;
+        status = "okay";
+        spi-max-frequency = <24000000>;
+        mmc {
+            compatible = "zephyr,sdmmc-disk";
+            disk-name = "SD";
+            status = "okay";
+        };
+    };
+};
+
+&pinctrl {
+    spi2_default: spi2_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 11)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 0)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 15)>;
+        };
+    };
+
+    spi2_sleep: spi2_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 11)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 0)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 15)>;
+            low-power-enable;
+        };
+    };
+};
