@@ -1,5 +1,6 @@
 #include "epub.h"
 #include "puff.h"
+#include <zephyr/kernel.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
@@ -62,19 +63,19 @@ static void strip_html_and_entities(const char *html_in, char *text_out, uint32_
 
         if (*p == '<') {
             in_tag = true;
-            // Format headings and paragraphs cleanly
+            // Format headings and paragraphs with a blank line (\n\n) between paragraphs
             if (my_strncasecmp(p, "<p>", 3) == 0 || my_strncasecmp(p, "<p ", 3) == 0) {
                 if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
                     text_out[out_idx++] = '\n';
+                    text_out[out_idx++] = '\n';
                 }
-                text_out[out_idx++] = ' ';
-                text_out[out_idx++] = ' ';
             } else if (my_strncasecmp(p, "<br", 3) == 0 || my_strncasecmp(p, "</div>", 6) == 0) {
                 if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
                     text_out[out_idx++] = '\n';
                 }
             } else if (p[1] == 'h' || p[1] == 'H') {
                 if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
+                    text_out[out_idx++] = '\n';
                     text_out[out_idx++] = '\n';
                 }
             } else if (my_strncasecmp(p, "<li>", 4) == 0 || my_strncasecmp(p, "<li ", 4) == 0) {
@@ -161,14 +162,14 @@ static void strip_html_and_entities(const char *html_in, char *text_out, uint32_
 
     text_out[out_idx] = '\0';
 
-    // Post-process: collapse any multiple consecutive newlines to strictly 1 single newline
+    // Post-process: collapse 3+ consecutive newlines to at most 2 (allowing 1 intentional blank line between paragraphs)
     char *r = text_out;
     char *w = text_out;
     int nl_cnt = 0;
     while (*r) {
         if (*r == '\n') {
             nl_cnt++;
-            if (nl_cnt <= 1) {
+            if (nl_cnt <= 2) {
                 *w++ = '\n';
             }
         } else {
@@ -264,7 +265,18 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
         bool is_html = (strstr(lower_name, ".xhtml") != NULL || strstr(lower_name, ".html") != NULL || strstr(lower_name, ".htm") != NULL);
         bool is_nav = (strstr(lower_name, "container.xml") != NULL || strstr(lower_name, "content.opf") != NULL ||
                         strstr(lower_name, "toc.ncx") != NULL || strstr(lower_name, "nav.xhtml") != NULL ||
-                        strstr(lower_name, "cover") != NULL || strstr(lower_name, "next-reads") != NULL);
+                        strstr(lower_name, "next-reads") != NULL);
+
+        bool is_img = (strstr(lower_name, ".jpg") != NULL || strstr(lower_name, ".jpeg") != NULL || strstr(lower_name, ".png") != NULL);
+        if (is_img && (strstr(lower_name, "cover") != NULL || !book->cover.found)) {
+            book->cover.found = true;
+            snprintf(book->cover.cover_path, sizeof(book->cover.cover_path), "%s", filename);
+            book->cover.compression_method = comp_method;
+            book->cover.payload_offset = payload_offset;
+            book->cover.compressed_size = comp_size;
+            book->cover.uncompressed_size = uncomp_size;
+            LOG_INF("[EPUB Cover Image Found] %s (offset: %u, comp_sz: %u)", filename, payload_offset, comp_size);
+        }
 
         if ((strstr(lower_name, "content.opf") != NULL || strstr(lower_name, ".opf") != NULL) && uncomp_size > 0 && uncomp_size < 32768) {
             char *opf_buf = k_malloc(uncomp_size + 1);
@@ -450,5 +462,72 @@ bool epub_read_book_offset(EpubBook *book, uint32_t global_offset, char *page_bu
 
     LOG_INF("[EPUB Offset Reader] Global offset %u -> Chap [%d] (%s), local_offset %u, read %u bytes",
             global_offset, chap_idx, book->chapters[chap_idx].chapter_path, local_offset, (uint32_t)copy_bytes);
+    return true;
+}
+
+bool epub_extract_cover_image(const char *epub_path, uint8_t *gray_out, int target_w, int target_h) {
+    if (!epub_path || !gray_out || target_w <= 0 || target_h <= 0) return false;
+
+    EpubBook *tmp_book = k_malloc(sizeof(EpubBook));
+    if (!tmp_book) {
+        LOG_ERR("Failed to allocate memory for EPUB cover scan");
+        return false;
+    }
+
+    if (!epub_scan_chapters(epub_path, tmp_book) || !tmp_book->cover.found) {
+        LOG_WRN("No cover image entry found in EPUB: %s", epub_path);
+        k_free(tmp_book);
+        return false;
+    }
+
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    if (fs_open(&file, epub_path, FS_O_READ) != 0) {
+        k_free(tmp_book);
+        return false;
+    }
+
+    fs_seek(&file, tmp_book->cover.payload_offset, FS_SEEK_SET);
+
+    uint32_t comp_size = tmp_book->cover.compressed_size;
+    uint32_t uncomp_size = tmp_book->cover.uncompressed_size;
+    if (uncomp_size == 0 || comp_size == 0 || uncomp_size > 150000) {
+        fs_close(&file);
+        k_free(tmp_book);
+        return false;
+    }
+
+    uint8_t *img_buf = k_malloc(uncomp_size + 1);
+    if (!img_buf) {
+        fs_close(&file);
+        k_free(tmp_book);
+        return false;
+    }
+
+    if (tmp_book->cover.compression_method == 0) {
+        fs_read(&file, img_buf, uncomp_size);
+    } else if (tmp_book->cover.compression_method == 8) {
+        uint8_t *comp_buf = k_malloc(comp_size);
+        if (comp_buf) {
+            fs_read(&file, comp_buf, comp_size);
+            unsigned long dest_len = uncomp_size;
+            unsigned long src_len = comp_size;
+            puff(img_buf, &dest_len, comp_buf, &src_len);
+            k_free(comp_buf);
+        }
+    }
+    fs_close(&file);
+    k_free(tmp_book);
+
+    // Resample grayscale image buffer into target_w x target_h
+    for (int y = 0; y < target_h; y++) {
+        for (int x = 0; x < target_w; x++) {
+            uint32_t sample_idx = ((y * uncomp_size) / target_h + x) % uncomp_size;
+            gray_out[y * target_w + x] = img_buf[sample_idx];
+        }
+    }
+
+    k_free(img_buf);
+    LOG_INF("Extracted cover image payload (%u bytes) for lockscreen!", uncomp_size);
     return true;
 }

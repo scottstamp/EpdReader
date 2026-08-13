@@ -109,13 +109,23 @@ void storage_dump_tree(void) {
 }
 
 int storage_init(void) {
-    int res = fs_mount(&sd_mount_point);
+    // Power-on stabilization delay for SD card internal controller after System OFF wake-up
+    k_msleep(250);
+
+    int res = -1;
+    for (int retry = 0; retry < 5; retry++) {
+        res = fs_mount(&sd_mount_point);
+        if (res == 0) break;
+        LOG_WRN("SD card mount attempt %d/5 failed (err=%d), retrying in 100ms...", retry + 1, res);
+        k_msleep(100);
+    }
+
     if (res != 0) {
-        LOG_WRN("SD card mount failed (res=%d). Running without SD card.", res);
+        LOG_ERR("SD card mount failed permanently (err=%d). Running without SD card.", res);
         return res;
     }
-    LOG_INF("SD card mounted successfully at %s", SD_MOUNT_POINT);
 
+    LOG_INF("SD card mounted successfully at %s", SD_MOUNT_POINT);
     storage_dump_tree();
     return 0;
 }
@@ -299,9 +309,16 @@ bool storage_read_book_page(const char *book_name, uint32_t offset, char *page_b
     // Standard .txt file reading
     struct fs_file_t file;
     fs_file_t_init(&file);
-    int res = fs_open(&file, full_path, FS_O_READ);
+
+    int res = -1;
+    for (int retry = 0; retry < 3; retry++) {
+        res = fs_open(&file, full_path, FS_O_READ);
+        if (res == 0) break;
+        k_msleep(50);
+    }
+
     if (res != 0) {
-        LOG_WRN("[SD Book] Failed to open %s (err=%d)", full_path, res);
+        LOG_WRN("[SD Book] Failed to open %s after retries (err=%d)", full_path, res);
         return false;
     }
 
@@ -334,14 +351,17 @@ bool storage_read_progress(char *book_name, uint32_t *offset) {
         return false;
     }
 
-    char line[128] = {0};
+    char line[256] = {0};
     int bytes = fs_read(&file, line, sizeof(line) - 1);
     fs_close(&file);
 
     if (bytes <= 0) return false;
     line[bytes] = '\0';
 
-    char *colon = strchr(line, ':');
+    char *nl = strpbrk(line, "\r\n");
+    if (nl) *nl = '\0';
+
+    char *colon = strrchr(line, ':');
     if (!colon) return false;
 
     *colon = '\0';
@@ -357,7 +377,7 @@ bool storage_write_progress(const char *book_name, uint32_t offset) {
         return false;
     }
 
-    char line[128];
+    char line[256];
     int len = snprintf(line, sizeof(line), "%s:%u\n", book_name, offset);
     fs_write(&file, line, len);
     fs_close(&file);
@@ -400,4 +420,55 @@ bool storage_write_stats(uint32_t total_seconds) {
     fs_write(&file, line, len);
     fs_close(&file);
     return true;
+}
+
+#define SLEEP_STATE_FILE SD_MOUNT_POINT "/sleep.txt"
+
+bool storage_read_sleep_state(int *state, int *menu_idx, char *active_book) {
+    struct fs_dirent entry;
+    if (fs_stat(SLEEP_STATE_FILE, &entry) != 0) return false;
+
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    if (fs_open(&file, SLEEP_STATE_FILE, FS_O_READ) != 0) return false;
+
+    char line[256] = {0};
+    int bytes = fs_read(&file, line, sizeof(line) - 1);
+    fs_close(&file);
+    if (bytes <= 0) return false;
+    line[bytes] = '\0';
+
+    // Format: "%d:%d:%s\n"
+    char *c1 = strchr(line, ':');
+    if (!c1) return false;
+    *c1 = '\0';
+    *state = atoi(line);
+
+    char *c2 = strchr(c1 + 1, ':');
+    if (!c2) return false;
+    *c2 = '\0';
+    *menu_idx = atoi(c1 + 1);
+
+    char *book_ptr = c2 + 1;
+    char *nl = strpbrk(book_ptr, "\r\n");
+    if (nl) *nl = '\0';
+
+    snprintf(active_book, 64, "%s", book_ptr);
+    return true;
+}
+
+bool storage_write_sleep_state(int state, int menu_idx, const char *active_book) {
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    if (fs_open(&file, SLEEP_STATE_FILE, FS_O_CREATE | FS_O_WRITE) != 0) return false;
+
+    char line[256];
+    int len = snprintf(line, sizeof(line), "%d:%d:%s\n", state, menu_idx, active_book ? active_book : "");
+    fs_write(&file, line, len);
+    fs_close(&file);
+    return true;
+}
+
+void storage_clear_sleep_state(void) {
+    fs_unlink(SLEEP_STATE_FILE);
 }

@@ -51,7 +51,8 @@ void display_draw_menu(const char *header, const char **options, int count, int 
 void display_draw_menu_ext(const char *header, const char *sub_footer, const char **options, int count, int selected_idx);
 void display_draw_message(const char *title, const char *msg, bool is_alert);
 void display_draw_progress(const char *task, int percentage);
-void display_draw_lockscreen(const char *title, const char *author, const char *chapter, const char *page, int press_count);
+void display_draw_lockscreen(const char *book_name, const char *title, const char *author, uint32_t progress_pct);
+void display_draw_atkinson_dithered(int dst_x, int dst_y, int target_w, int target_h, const uint8_t *gray_img, int img_w, int img_h);
 uint32_t display_draw_reader_page(const char *book_name, const char *text_page, uint32_t progress_pct);
 
 // Font/Settings accessors & manipulators

@@ -21,4 +21,6 @@ target_sources(app PRIVATE
     src/battery.c
     src/puff.c
     src/epub.c
+    src/tjpgd.c
+    src/font_extended.c
 )

@@ -43,15 +43,18 @@ static const char *main_menu_options[] = {
     "Bootloader Mode",
     "Resume Reading",
     "Book List (SD)",
+    "USB Transfer",
     "BLE Upload Mode",
     "Reading Stats",
     "Lock Screen"
 };
-static int main_menu_count = 6;
+static int main_menu_count = 7;
 static int selected_menu_idx = 0;
 
 static int selected_reader_menu_idx = 0;
 static int selected_font_menu_idx = 0;
+
+static SystemState pre_sleep_state = STATE_MENU;
 
 static void format_session_time(uint32_t sec, char *out_buf, size_t buf_size) {
     uint32_t mins = sec / 60;
@@ -95,11 +98,11 @@ static void render_current_state(void) {
                 session_start_ms = k_uptime_get_32();
             }
 
-            char page_buf[1024] = {0};
-            uint32_t bytes_read = 0;
-
             char display_title[64];
             storage_get_book_display_title(active_book, display_title, sizeof(display_title));
+
+            char page_buf[1024] = {0};
+            uint32_t bytes_read = 0;
 
             bool ok = storage_read_book_page(active_book, current_page_offset, page_buf, sizeof(page_buf), &bytes_read);
             if (!ok || bytes_read == 0) {
@@ -178,9 +181,29 @@ static void render_current_state(void) {
             break;
         }
 
-        case STATE_LOCKSCREEN:
-            display_draw_lockscreen(active_book[0] ? active_book : "e-Paper Reader", "NiceNano V2", "Chapter 1", "35%", 0);
+        case STATE_LOCKSCREEN: {
+            char title[64] = {0};
+            char author[64] = {0};
+            if (active_book[0] != '\0') {
+                storage_get_book_metadata(active_book, title, sizeof(title), author, sizeof(author));
+            } else {
+                snprintf(title, sizeof(title), "e-Paper Reader");
+                snprintf(author, sizeof(author), "nRF52840 Zephyr");
+            }
+
+            uint32_t file_size = active_book[0] ? storage_get_book_size(active_book) : 0;
+            uint32_t progress_pct = (file_size > 0) ? ((current_page_offset * 100) / file_size) : 0;
+            if (progress_pct > 100) progress_pct = 100;
+
+            display_draw_lockscreen(active_book, title, author, progress_pct);
+
+            // Save pre-sleep state to storage so wake-up restores exact view
+            storage_write_sleep_state((int)pre_sleep_state, selected_menu_idx, active_book);
+
+            // Enter deep sleep immediately after displaying lockscreen
+            enter_deep_sleep();
             break;
+        }
 
         case STATE_STATS: {
             char msg[64];
@@ -226,17 +249,40 @@ int main(void) {
 
     storage_read_stats(&total_reading_seconds);
 
-    char saved_book[64] = "";
-    uint32_t saved_offset = 0;
-    if (storage_read_progress(saved_book, &saved_offset) && saved_book[0] != '\0') {
-        snprintf(active_book, sizeof(active_book), "%s", saved_book);
-        current_page_offset = saved_offset;
+    int restored_state = -1;
+    int restored_idx = 0;
+    char restored_book[64] = {0};
+
+    if (storage_read_sleep_state(&restored_state, &restored_idx, restored_book) && restored_state >= 0) {
+        if (restored_book[0] != '\0') {
+            snprintf(active_book, sizeof(active_book), "%s", restored_book);
+            uint32_t saved_offset = 0;
+            char temp_b[64];
+            if (storage_read_progress(temp_b, &saved_offset)) {
+                current_page_offset = saved_offset;
+            }
+        }
+        if (restored_state == (int)STATE_READER || restored_state == (int)STATE_READER_MENU) {
+            current_state = STATE_READER;
+        } else if (restored_state == (int)STATE_BOOK_LIST) {
+            current_state = STATE_BOOK_LIST;
+            book_count = storage_list_sd_books(book_list, MAX_BOOKS);
+        } else {
+            current_state = STATE_MENU;
+            selected_menu_idx = restored_idx;
+        }
+        storage_clear_sleep_state();
+    } else {
+        char saved_book[64] = "";
+        uint32_t saved_offset = 0;
+        if (storage_read_progress(saved_book, &saved_offset) && saved_book[0] != '\0') {
+            snprintf(active_book, sizeof(active_book), "%s", saved_book);
+            current_page_offset = saved_offset;
+        }
+        current_state = STATE_MENU;
     }
 
-    // Initial boot render: Render Main Menu into framebuffer and execute FULL OTP REFRESH ONCE!
-    display_clear_buffer();
-    display_draw_menu_ext("Main Menu", NULL, main_menu_options, main_menu_count, selected_menu_idx);
-    display_update(true); // Full OTP Refresh renders Main Menu directly in deep pure black/white!
+    render_current_state();
     last_activity_time = k_uptime_get_32();
 
     while (1) {
@@ -310,13 +356,16 @@ int main(void) {
                         book_count = storage_list_sd_books(book_list, MAX_BOOKS);
                         selected_book_idx = 0;
                         current_state = STATE_BOOK_LIST;
-                    } else if (selected_menu_idx == 3) { // BLE Upload
+                    } else if (selected_menu_idx == 3) { // USB Transfer
+                        current_state = STATE_USB_STORAGE;
+                    } else if (selected_menu_idx == 4) { // BLE Upload
                         current_state = STATE_BLE_UPLOAD;
                         ble_init(NULL, NULL);
                         ble_start_advertising();
-                    } else if (selected_menu_idx == 4) { // Stats
+                    } else if (selected_menu_idx == 5) { // Stats
                         current_state = STATE_STATS;
-                    } else if (selected_menu_idx == 5) { // Lockscreen
+                    } else if (selected_menu_idx == 6) { // Lockscreen
+                        pre_sleep_state = STATE_MENU;
                         current_state = STATE_LOCKSCREEN;
                     }
                     render_current_state();
@@ -344,6 +393,7 @@ int main(void) {
                         display_update(true);
                         current_state = STATE_READER;
                     } else if (selected_reader_menu_idx == 4) { // Lockscreen
+                        pre_sleep_state = STATE_READER;
                         current_state = STATE_LOCKSCREEN;
                     } else if (selected_reader_menu_idx == 5) { // Exit to main menu
                         current_state = STATE_MENU;
@@ -378,7 +428,9 @@ int main(void) {
                     current_state = STATE_MENU;
                     render_current_state();
                 } else {
-                    enter_deep_sleep();
+                    pre_sleep_state = current_state;
+                    current_state = STATE_LOCKSCREEN;
+                    render_current_state();
                 }
                 break;
 
@@ -386,8 +438,16 @@ int main(void) {
                 break;
         }
 
-        if (k_uptime_get_32() - last_activity_time > AUTO_SLEEP_MS) {
-            enter_deep_sleep();
+        /* Keep activity timer fresh while in USB Mass Storage mode */
+        if (current_state == STATE_USB_STORAGE) {
+            last_activity_time = k_uptime_get_32();
+        }
+
+        if (current_state != STATE_USB_STORAGE &&
+            (k_uptime_get_32() - last_activity_time > AUTO_SLEEP_MS)) {
+            pre_sleep_state = current_state;
+            current_state = STATE_LOCKSCREEN;
+            render_current_state();
         }
 
         k_msleep(20);
