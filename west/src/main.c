@@ -10,6 +10,7 @@
 #include "buttons.h"
 #include "ble.h"
 #include "battery.h"
+#include "epub.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -18,6 +19,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 typedef enum {
     STATE_MENU,
     STATE_BOOK_LIST,
+    STATE_CHAPTER_LIST,
     STATE_READER,
     STATE_READER_MENU,
     STATE_FONT_SETTINGS,
@@ -36,6 +38,9 @@ static char active_book[64] = "";
 static uint32_t current_page_offset = 0;
 static uint32_t last_page_bytes_read = 300;
 static uint32_t total_reading_seconds = 0;
+
+static EpubBook current_epub;
+static int selected_chapter_idx = 0;
 
 static uint32_t session_start_ms = 0;
 
@@ -138,6 +143,7 @@ static void render_current_state(void) {
 
             const char *reader_options[] = {
                 "Resume Reading",
+                "Select Chapter",
                 "Font Settings",
                 flip_str,
                 "Refresh Display",
@@ -145,7 +151,18 @@ static void render_current_state(void) {
                 "Exit to Main Menu"
             };
 
-            display_draw_menu_ext(header_str, session_str, reader_options, 6, selected_reader_menu_idx);
+            display_draw_menu_ext(header_str, session_str, reader_options, 7, selected_reader_menu_idx);
+            break;
+        }
+
+        case STATE_CHAPTER_LIST: {
+            const char *chap_titles[MAX_EPUB_CHAPTERS];
+            int count = current_epub.chapter_count;
+            if (count > MAX_EPUB_CHAPTERS) count = MAX_EPUB_CHAPTERS;
+            for (int i = 0; i < count; i++) {
+                chap_titles[i] = current_epub.chapters[i].title;
+            }
+            display_draw_menu_ext("Select Chapter", NULL, chap_titles, count, selected_chapter_idx);
             break;
         }
 
@@ -309,8 +326,13 @@ int main(void) {
                     }
                     storage_write_progress(active_book, current_page_offset);
                     render_current_state();
+                } else if (current_state == STATE_CHAPTER_LIST) {
+                    if (current_epub.chapter_count > 0) {
+                        selected_chapter_idx = (selected_chapter_idx > 0) ? selected_chapter_idx - 1 : current_epub.chapter_count - 1;
+                        render_current_state();
+                    }
                 } else if (current_state == STATE_READER_MENU) {
-                    selected_reader_menu_idx = (selected_reader_menu_idx > 0) ? selected_reader_menu_idx - 1 : 5;
+                    selected_reader_menu_idx = (selected_reader_menu_idx > 0) ? selected_reader_menu_idx - 1 : 6;
                     render_current_state();
                 } else if (current_state == STATE_FONT_SETTINGS) {
                     selected_font_menu_idx = (selected_font_menu_idx > 0) ? selected_font_menu_idx - 1 : 4;
@@ -331,8 +353,13 @@ int main(void) {
                     current_page_offset += last_page_bytes_read;
                     storage_write_progress(active_book, current_page_offset);
                     render_current_state();
+                } else if (current_state == STATE_CHAPTER_LIST) {
+                    if (current_epub.chapter_count > 0) {
+                        selected_chapter_idx = (selected_chapter_idx + 1) % current_epub.chapter_count;
+                        render_current_state();
+                    }
                 } else if (current_state == STATE_READER_MENU) {
-                    selected_reader_menu_idx = (selected_reader_menu_idx + 1) % 6;
+                    selected_reader_menu_idx = (selected_reader_menu_idx + 1) % 7;
                     render_current_state();
                 } else if (current_state == STATE_FONT_SETTINGS) {
                     selected_font_menu_idx = (selected_font_menu_idx + 1) % 5;
@@ -384,20 +411,33 @@ int main(void) {
                 } else if (current_state == STATE_READER_MENU) {
                     if (selected_reader_menu_idx == 0) { // Resume
                         current_state = STATE_READER;
-                    } else if (selected_reader_menu_idx == 1) { // Font Settings
+                    } else if (selected_reader_menu_idx == 1) { // Select Chapter
+                        char path[256];
+                        snprintf(path, sizeof(path), "/SD:/BOOKS/%s", active_book);
+                        epub_scan_chapters(path, &current_epub);
+                        selected_chapter_idx = 0;
+                        current_state = STATE_CHAPTER_LIST;
+                    } else if (selected_reader_menu_idx == 2) { // Font Settings
                         selected_font_menu_idx = 0;
                         current_state = STATE_FONT_SETTINGS;
-                    } else if (selected_reader_menu_idx == 2) { // Orientation
+                    } else if (selected_reader_menu_idx == 3) { // Orientation
                         display_set_flipped(!display_is_flipped());
-                    } else if (selected_reader_menu_idx == 3) { // Refresh
+                    } else if (selected_reader_menu_idx == 4) { // Refresh
                         display_update(true);
                         current_state = STATE_READER;
-                    } else if (selected_reader_menu_idx == 4) { // Lockscreen
+                    } else if (selected_reader_menu_idx == 5) { // Lockscreen
                         pre_sleep_state = STATE_READER;
                         current_state = STATE_LOCKSCREEN;
-                    } else if (selected_reader_menu_idx == 5) { // Exit to main menu
+                    } else if (selected_reader_menu_idx == 6) { // Exit to main menu
                         current_state = STATE_MENU;
                     }
+                    render_current_state();
+                } else if (current_state == STATE_CHAPTER_LIST) {
+                    if (selected_chapter_idx >= 0 && selected_chapter_idx < current_epub.chapter_count) {
+                        current_page_offset = current_epub.chapters[selected_chapter_idx].cum_offset;
+                        storage_write_progress(active_book, current_page_offset);
+                    }
+                    current_state = STATE_READER;
                     render_current_state();
                 } else if (current_state == STATE_FONT_SETTINGS) {
                     if (selected_font_menu_idx == 0) {

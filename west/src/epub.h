@@ -5,10 +5,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define MAX_EPUB_CHAPTERS 64
+#define MAX_EPUB_CHAPTERS 128
 
 typedef struct {
     char chapter_path[128];
+    char title[64];
     uint16_t compression_method; // 0 = store, 8 = deflate
     uint32_t payload_offset;
     uint32_t compressed_size;

@@ -10,8 +10,8 @@
 
 LOG_MODULE_REGISTER(epub, LOG_LEVEL_INF);
 
-static uint8_t s_comp_buf[16384];   // 16 KB static compressed payload buffer
-static char s_raw_html_buf[32768];  // 32 KB static inflated HTML buffer
+static uint8_t s_comp_buf[10240];   // 10 KB static compressed payload buffer
+static char s_raw_html_buf[16384];  // 16 KB static inflated HTML buffer
 
 static int my_strncasecmp(const char *s1, const char *s2, size_t n) {
     while (n && *s1 && *s2) {
@@ -22,6 +22,16 @@ static int my_strncasecmp(const char *s1, const char *s2, size_t n) {
         n--;
     }
     if (n == 0) return 0;
+    return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
+}
+
+static int my_strcasecmp(const char *s1, const char *s2) {
+    while (*s1 && *s2) {
+        int diff = tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
+        if (diff != 0) return diff;
+        s1++;
+        s2++;
+    }
     return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
 }
 
@@ -201,9 +211,192 @@ static int natural_chapter_cmp(const void *a, const void *b) {
     }
     return (*s1 == '\0') ? ((*s2 == '\0') ? 0 : -1) : 1;
 }
+static void parse_toc_ncx_titles(const char *ncx_buf, EpubBook *book)
+{
+    if (!ncx_buf || !book || book->chapter_count == 0) return;
+
+    const char *p = ncx_buf;
+    while (*p) {
+        const char *np = my_strcasestr(p, "<navPoint");
+        if (!np) break;
+
+        const char *np_end_tag = strchr(np, '>');
+        if (!np_end_tag) break;
+        p = np_end_tag + 1;
+
+        const char *next_np = my_strcasestr(p, "<navPoint");
+        const char *close_np = my_strcasestr(p, "</navPoint>");
+
+        const char *block_limit = close_np;
+        if (next_np && (!block_limit || next_np < block_limit)) {
+            block_limit = next_np;
+        }
+        if (!block_limit) block_limit = p + strlen(p);
+
+        const char *lbl = my_strcasestr(p, "<text>");
+        if (!lbl || lbl >= block_limit) continue;
+
+        lbl += 6;
+        const char *lbl_end = strchr(lbl, '<');
+        if (!lbl_end || lbl_end >= block_limit) continue;
+
+        char title[64] = {0};
+        size_t tlen = (size_t)(lbl_end - lbl);
+        if (tlen >= sizeof(title)) tlen = sizeof(title) - 1;
+        memcpy(title, lbl, tlen);
+        title[tlen] = '\0';
+
+        const char *src = my_strcasestr(p, "src=");
+        if (!src || src >= block_limit) continue;
+
+        src += 4;
+        if (*src == '"' || *src == '\'') src++;
+        const char *src_end = strpbrk(src, "\"'>\t\r\n ");
+        if (src_end && src_end > src && src_end <= block_limit) {
+            char target_href[128] = {0};
+            size_t hlen = (size_t)(src_end - src);
+            if (hlen >= sizeof(target_href)) hlen = sizeof(target_href) - 1;
+            memcpy(target_href, src, hlen);
+            target_href[hlen] = '\0';
+
+            /* Strip #anchor fragment */
+            char *hash = strchr(target_href, '#');
+            if (hash) *hash = '\0';
+
+            char *base = strrchr(target_href, '/');
+            if (!base) base = strrchr(target_href, '\\');
+            base = base ? (base + 1) : target_href;
+
+            for (int c = 0; c < book->chapter_count; c++) {
+                char *cbase = strrchr(book->chapters[c].chapter_path, '/');
+                if (!cbase) cbase = strrchr(book->chapters[c].chapter_path, '\\');
+                cbase = cbase ? (cbase + 1) : book->chapters[c].chapter_path;
+
+                if (my_strcasecmp(cbase, base) == 0) {
+                    snprintf(book->chapters[c].title, sizeof(book->chapters[c].title), "%s", title);
+                    LOG_INF("[EPUB TOC Match] %s -> '%s'", cbase, title);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+typedef struct {
+    char id[64];
+    char href[128];
+} ManifestItem;
+
+static bool parse_opf_spine_order(const char *opf_buf, EpubBook *book)
+{
+    if (!opf_buf || !book || book->chapter_count == 0) return false;
+
+    ManifestItem *manifest = k_malloc(sizeof(ManifestItem) * 128);
+    if (!manifest) return false;
+    int manifest_count = 0;
+
+    const char *m_start = my_strcasestr(opf_buf, "<manifest");
+    const char *m_end = m_start ? my_strcasestr(m_start, "</manifest>") : NULL;
+    if (m_start && m_end) {
+        const char *p = m_start;
+        while (p < m_end && manifest_count < 128) {
+            const char *item = my_strcasestr(p, "<item ");
+            if (!item || item >= m_end) break;
+
+            const char *id_attr = my_strcasestr(item, "id=");
+            const char *href_attr = my_strcasestr(item, "href=");
+
+            if (id_attr && href_attr && id_attr < strchr(item, '>') && href_attr < strchr(item, '>')) {
+                id_attr += 3; if (*id_attr == '"' || *id_attr == '\'') id_attr++;
+                const char *id_end = strpbrk(id_attr, "\"'>");
+                
+                href_attr += 5; if (*href_attr == '"' || *href_attr == '\'') href_attr++;
+                const char *href_end = strpbrk(href_attr, "\"'>");
+
+                if (id_end && href_end && id_end > id_attr && href_end > href_attr) {
+                    ManifestItem *mi = &manifest[manifest_count++];
+                    size_t id_len = id_end - id_attr;
+                    if (id_len >= sizeof(mi->id)) id_len = sizeof(mi->id) - 1;
+                    memcpy(mi->id, id_attr, id_len); mi->id[id_len] = '\0';
+
+                    size_t href_len = href_end - href_attr;
+                    if (href_len >= sizeof(mi->href)) href_len = sizeof(mi->href) - 1;
+                    memcpy(mi->href, href_attr, href_len); mi->href[href_len] = '\0';
+
+                    char *hash = strchr(mi->href, '#');
+                    if (hash) *hash = '\0';
+                }
+            }
+            p = item + 6;
+        }
+    }
+
+    bool success = false;
+    const char *s_start = my_strcasestr(opf_buf, "<spine");
+    const char *s_end = s_start ? my_strcasestr(s_start, "</spine>") : NULL;
+    if (s_start && s_end) {
+        EpubChapterInfo *ordered_chapters = k_malloc(sizeof(EpubChapterInfo) * MAX_EPUB_CHAPTERS);
+        if (ordered_chapters) {
+            int ordered_count = 0;
+            const char *p = s_start;
+            while (p < s_end && ordered_count < MAX_EPUB_CHAPTERS) {
+                const char *ref = my_strcasestr(p, "<itemref ");
+                if (!ref || ref >= s_end) break;
+
+                const char *idref_attr = my_strcasestr(ref, "idref=");
+                if (idref_attr && idref_attr < strchr(ref, '>')) {
+                    idref_attr += 6; if (*idref_attr == '"' || *idref_attr == '\'') idref_attr++;
+                    const char *idref_end = strpbrk(idref_attr, "\"'>");
+                    if (idref_end && idref_end > idref_attr) {
+                        char target_id[64] = {0};
+                        size_t tlen = idref_end - idref_attr;
+                        if (tlen >= sizeof(target_id)) tlen = sizeof(target_id) - 1;
+                        memcpy(target_id, idref_attr, tlen); target_id[tlen] = '\0';
+
+                        const char *target_href = NULL;
+                        for (int m = 0; m < manifest_count; m++) {
+                            if (strcmp(manifest[m].id, target_id) == 0) {
+                                target_href = manifest[m].href;
+                                break;
+                            }
+                        }
+
+                        if (target_href) {
+                            char *mbase = strrchr(target_href, '/');
+                            if (!mbase) mbase = strrchr(target_href, '\\');
+                            mbase = mbase ? (mbase + 1) : target_href;
+
+                            for (int c = 0; c < book->chapter_count; c++) {
+                                char *cbase = strrchr(book->chapters[c].chapter_path, '/');
+                                if (!cbase) cbase = strrchr(book->chapters[c].chapter_path, '\\');
+                                cbase = cbase ? (cbase + 1) : book->chapters[c].chapter_path;
+
+                                if (my_strcasecmp(cbase, mbase) == 0) {
+                                    ordered_chapters[ordered_count++] = book->chapters[c];
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                p = ref + 9;
+            }
+
+            if (ordered_count > 0) {
+                LOG_INF("[EPUB Spine] Re-ordered %d chapters according to OPF spine", ordered_count);
+                memcpy(book->chapters, ordered_chapters, sizeof(EpubChapterInfo) * ordered_count);
+                book->chapter_count = ordered_count;
+                success = true;
+            }
+            k_free(ordered_chapters);
+        }
+    }
+    k_free(manifest);
+    return success;
+}
 
 #define EPUB_CACHE_MAGIC   0x45505542u  /* "EPUB" */
-#define EPUB_CACHE_VERSION 1u
+#define EPUB_CACHE_VERSION 6u
 
 typedef struct {
     uint32_t magic;
@@ -219,7 +412,7 @@ static void build_cache_path(const char *epub_path, char *cache_path_out, size_t
     if (!base) base = strrchr(epub_path, '\\');
     base = base ? (base + 1) : epub_path;
 
-    snprintf(cache_path_out, max_len, "/SD/.cache/%s.idx", base);
+    snprintf(cache_path_out, max_len, "/SD:/cache/%s.idx", base);
 }
 
 static bool load_sidecar_cache(const char *cache_path, EpubBook *book)
@@ -256,9 +449,18 @@ static bool load_sidecar_cache(const char *cache_path, EpubBook *book)
 
 static void save_sidecar_cache(const char *cache_path, const EpubBook *book)
 {
+    struct fs_dirent cache_dir_stat;
+    if (fs_stat("/SD:/cache", &cache_dir_stat) != 0) {
+        fs_mkdir("/SD:/cache");
+    }
+
     struct fs_file_t f;
     fs_file_t_init(&f);
-    if (fs_open(&f, cache_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC) != 0) return;
+    int res = fs_open(&f, cache_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+    if (res != 0) {
+        LOG_ERR("Failed to save index cache: %s (err %d)", cache_path, res);
+        return;
+    }
 
     EpubCacheHeader hdr = {
         .magic = EPUB_CACHE_MAGIC,
@@ -302,7 +504,13 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
     uint32_t curr_pos = 0;
     int scanned_headers = 0;
 
-    while (book->chapter_count < MAX_EPUB_CHAPTERS && scanned_headers < 200) {
+    uint32_t ncx_payload_offset = 0, ncx_comp_size = 0, ncx_uncomp_size = 0;
+    uint16_t ncx_comp_method = 0;
+
+    uint32_t opf_payload_offset = 0, opf_comp_size = 0, opf_uncomp_size = 0;
+    uint16_t opf_comp_method = 0;
+
+    while (book->chapter_count < MAX_EPUB_CHAPTERS && scanned_headers < 500) {
         fs_seek(&file, curr_pos, FS_SEEK_SET);
 
         uint8_t hdr[30];
@@ -342,6 +550,14 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
             lower_name[i+1] = '\0';
         }
 
+        if (strstr(lower_name, "toc.ncx") != NULL || strstr(lower_name, ".ncx") != NULL) {
+            ncx_payload_offset = payload_offset;
+            ncx_comp_method = comp_method;
+            ncx_comp_size = comp_size;
+            ncx_uncomp_size = uncomp_size;
+            LOG_INF("[EPUB TOC NCX Found] %s (offset: %u)", filename, payload_offset);
+        }
+
         bool is_html = (strstr(lower_name, ".xhtml") != NULL || strstr(lower_name, ".html") != NULL || strstr(lower_name, ".htm") != NULL);
         bool is_nav = (strstr(lower_name, "container.xml") != NULL || strstr(lower_name, "content.opf") != NULL ||
                         strstr(lower_name, "toc.ncx") != NULL || strstr(lower_name, "nav.xhtml") != NULL ||
@@ -359,6 +575,10 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
         }
 
         if ((strstr(lower_name, "content.opf") != NULL || strstr(lower_name, ".opf") != NULL) && uncomp_size > 0 && uncomp_size < 32768) {
+            opf_payload_offset = payload_offset;
+            opf_comp_method = comp_method;
+            opf_comp_size = comp_size;
+            opf_uncomp_size = uncomp_size;
             char *opf_buf = k_malloc(uncomp_size + 1);
             if (opf_buf) {
                 if (comp_method == 0) {
@@ -434,12 +654,78 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
 
     fs_close(&file);
 
-    if (book->chapter_count > 1) {
+    bool spine_ordered = false;
+    if (opf_payload_offset > 0 && opf_uncomp_size > 0 && opf_uncomp_size < 32768) {
+        struct fs_file_t opfile;
+        fs_file_t_init(&opfile);
+        if (fs_open(&opfile, epub_path, FS_O_READ) == 0) {
+            fs_seek(&opfile, opf_payload_offset, FS_SEEK_SET);
+            char *opf_buf = k_malloc(opf_uncomp_size + 1);
+            if (opf_buf) {
+                if (opf_comp_method == 0) {
+                    fs_read(&opfile, opf_buf, opf_uncomp_size);
+                    opf_buf[opf_uncomp_size] = '\0';
+                } else if (opf_comp_method == 8) {
+                    uint8_t *cbuf = k_malloc(opf_comp_size);
+                    if (cbuf) {
+                        fs_read(&opfile, cbuf, opf_comp_size);
+                        unsigned long dest_len = opf_uncomp_size;
+                        unsigned long src_len = opf_comp_size;
+                        puff((unsigned char*)opf_buf, &dest_len, cbuf, &src_len);
+                        opf_buf[dest_len] = '\0';
+                        k_free(cbuf);
+                    } else {
+                        LOG_ERR("[EPUB OPF] Failed to allocate comp buffer (%u bytes)", opf_comp_size);
+                    }
+                }
+                spine_ordered = parse_opf_spine_order(opf_buf, book);
+                k_free(opf_buf);
+            } else {
+                LOG_ERR("[EPUB OPF] Failed to allocate uncomp buffer (%u bytes)", opf_uncomp_size);
+            }
+            fs_close(&opfile);
+        }
+    }
+
+    if (!spine_ordered && book->chapter_count > 1) {
         qsort(book->chapters, book->chapter_count, sizeof(EpubChapterInfo), natural_chapter_cmp);
+    }
+
+    if (ncx_payload_offset > 0 && ncx_uncomp_size > 0 && ncx_uncomp_size < 32768) {
+        struct fs_file_t nfile;
+        fs_file_t_init(&nfile);
+        if (fs_open(&nfile, epub_path, FS_O_READ) == 0) {
+            fs_seek(&nfile, ncx_payload_offset, FS_SEEK_SET);
+            char *ncx_buf = k_malloc(ncx_uncomp_size + 1);
+            if (ncx_buf) {
+                if (ncx_comp_method == 0) {
+                    fs_read(&nfile, ncx_buf, ncx_uncomp_size);
+                    ncx_buf[ncx_uncomp_size] = '\0';
+                } else if (ncx_comp_method == 8) {
+                    uint8_t *cbuf = k_malloc(ncx_comp_size);
+                    if (cbuf) {
+                        fs_read(&nfile, cbuf, ncx_comp_size);
+                        unsigned long dest_len = ncx_uncomp_size;
+                        unsigned long src_len = ncx_comp_size;
+                        puff((unsigned char*)ncx_buf, &dest_len, cbuf, &src_len);
+                        ncx_buf[dest_len] = '\0';
+                        k_free(cbuf);
+                    } else {
+                        LOG_ERR("[EPUB NCX] Failed to allocate comp buffer (%u bytes)", ncx_comp_size);
+                    }
+                }
+                parse_toc_ncx_titles(ncx_buf, book);
+                k_free(ncx_buf);
+            } else {
+                LOG_ERR("[EPUB NCX] Failed to allocate uncomp buffer (%u bytes)", ncx_uncomp_size);
+            }
+            fs_close(&nfile);
+        }
     }
 
     uint32_t current_cum = 0;
     static char s_temp_txt[8192];
+    int main_chap_counter = 1;
     for (int i = 0; i < book->chapter_count; i++) {
         book->chapters[i].cum_offset = current_cum;
         if (epub_read_chapter_text(epub_path, &book->chapters[i], s_temp_txt, sizeof(s_temp_txt))) {
@@ -448,8 +734,36 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
             book->chapters[i].text_length = 500;
         }
         current_cum += book->chapters[i].text_length;
-        LOG_INF("Ordered Chapter [%d]: %s (cum_offset: %u, text_len: %u)",
-                i, book->chapters[i].chapter_path, book->chapters[i].cum_offset, book->chapters[i].text_length);
+        if (book->chapters[i].title[0] == '\0') {
+            char lower_chap[128];
+            for (int k = 0; book->chapters[i].chapter_path[k] && k < 127; k++) {
+                lower_chap[k] = tolower((unsigned char)book->chapters[i].chapter_path[k]);
+                lower_chap[k+1] = '\0';
+            }
+            if (strstr(lower_chap, "cover") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Cover");
+            } else if (strstr(lower_chap, "title") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Title Page");
+            } else if (strstr(lower_chap, "copyright") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Copyright");
+            } else if (strstr(lower_chap, "foreword") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Foreword");
+            } else if (strstr(lower_chap, "preface") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Preface");
+            } else if (strstr(lower_chap, "prologue") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Prologue");
+            } else if (strstr(lower_chap, "epilogue") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Epilogue");
+            } else if (strstr(lower_chap, "ack") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Acknowledgements");
+            } else if (strstr(lower_chap, "author") != NULL || strstr(lower_chap, "bio") != NULL || strstr(lower_chap, "about") != NULL) {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "About the Author");
+            } else {
+                snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Chapter %d", main_chap_counter++);
+            }
+        }
+        LOG_INF("Ordered Chapter [%d]: %s ('%s', cum_offset: %u, text_len: %u)",
+                i, book->chapters[i].chapter_path, book->chapters[i].title, book->chapters[i].cum_offset, book->chapters[i].text_length);
     }
     book->total_book_text_len = current_cum;
 
