@@ -202,6 +202,79 @@ static int natural_chapter_cmp(const void *a, const void *b) {
     return (*s1 == '\0') ? ((*s2 == '\0') ? 0 : -1) : 1;
 }
 
+#define EPUB_CACHE_MAGIC   0x45505542u  /* "EPUB" */
+#define EPUB_CACHE_VERSION 1u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t total_book_text_len;
+    uint16_t chapter_count;
+    uint16_t reserved;
+} EpubCacheHeader;
+
+static void build_cache_path(const char *epub_path, char *cache_path_out, size_t max_len)
+{
+    const char *base = strrchr(epub_path, '/');
+    if (!base) base = strrchr(epub_path, '\\');
+    base = base ? (base + 1) : epub_path;
+
+    snprintf(cache_path_out, max_len, "/SD/.cache/%s.idx", base);
+}
+
+static bool load_sidecar_cache(const char *cache_path, EpubBook *book)
+{
+    struct fs_file_t f;
+    fs_file_t_init(&f);
+    if (fs_open(&f, cache_path, FS_O_READ) != 0) return false;
+
+    EpubCacheHeader hdr;
+    ssize_t rb = fs_read(&f, &hdr, sizeof(hdr));
+    if (rb != sizeof(hdr) || hdr.magic != EPUB_CACHE_MAGIC || hdr.version != EPUB_CACHE_VERSION) {
+        fs_close(&f);
+        return false;
+    }
+
+    if (hdr.chapter_count > MAX_EPUB_CHAPTERS) {
+        fs_close(&f);
+        return false;
+    }
+
+    book->chapter_count = (int)hdr.chapter_count;
+    book->total_book_text_len = hdr.total_book_text_len;
+
+    size_t chap_bytes = sizeof(EpubChapterInfo) * hdr.chapter_count;
+    rb = fs_read(&f, book->chapters, chap_bytes);
+    fs_close(&f);
+
+    if ((size_t)rb != chap_bytes) return false;
+
+    LOG_INF("Instant load from cache: %s (%d chapters, %u total text len)",
+            cache_path, book->chapter_count, book->total_book_text_len);
+    return true;
+}
+
+static void save_sidecar_cache(const char *cache_path, const EpubBook *book)
+{
+    struct fs_file_t f;
+    fs_file_t_init(&f);
+    if (fs_open(&f, cache_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC) != 0) return;
+
+    EpubCacheHeader hdr = {
+        .magic = EPUB_CACHE_MAGIC,
+        .version = EPUB_CACHE_VERSION,
+        .total_book_text_len = book->total_book_text_len,
+        .chapter_count = (uint16_t)book->chapter_count,
+        .reserved = 0
+    };
+
+    fs_write(&f, &hdr, sizeof(hdr));
+    fs_write(&f, book->chapters, sizeof(EpubChapterInfo) * book->chapter_count);
+    fs_close(&f);
+
+    LOG_INF("Saved index cache: %s", cache_path);
+}
+
 bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
     if (!epub_path || !book) return false;
 
@@ -209,6 +282,13 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
 
     memset(book, 0, sizeof(EpubBook));
     snprintf(book->book_path, sizeof(book->book_path), "%s", epub_path);
+
+    char cache_path[256];
+    build_cache_path(epub_path, cache_path, sizeof(cache_path));
+
+    if (load_sidecar_cache(cache_path, book)) {
+        return true;
+    }
 
     struct fs_file_t file;
     fs_file_t_init(&file);
@@ -375,6 +455,10 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
 
     LOG_INF("=== EPUB SCAN COMPLETE: Found %d sorted chapters, total text len: %u ===",
             book->chapter_count, book->total_book_text_len);
+
+    if (book->chapter_count > 0) {
+        save_sidecar_cache(cache_path, book);
+    }
     return (book->chapter_count > 0);
 }
 

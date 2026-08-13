@@ -126,6 +126,7 @@ int storage_init(void) {
     }
 
     LOG_INF("SD card mounted successfully at %s", SD_MOUNT_POINT);
+    fs_mkdir("/SD/.cache");
     storage_dump_tree();
     return 0;
 }
