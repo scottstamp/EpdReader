@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "display_gdey037t03.h"
 
 typedef enum {
     FONT_SERIF,     // Bookerly
@@ -51,7 +52,7 @@ void display_draw_menu(const char *header, const char **options, int count, int 
 void display_draw_menu_ext(const char *header, const char *sub_footer, const char **options, int count, int selected_idx);
 void display_draw_message(const char *title, const char *msg, bool is_alert);
 void display_draw_progress(const char *task, int percentage);
-void display_draw_lockscreen(const char *book_name, const char *title, const char *author, uint32_t progress_pct);
+void display_draw_lockscreen(const char *book_name, const char *title, const char *author, const char *chapter_title, uint32_t progress_pct);
 void display_draw_atkinson_dithered(int dst_x, int dst_y, int target_w, int target_h, const uint8_t *gray_img, int img_w, int img_h);
 uint32_t display_draw_reader_page(const char *book_name, const char *text_page, uint32_t progress_pct);
 
@@ -75,5 +76,20 @@ void display_cycle_contrast(void);
 
 void display_draw_battery(int percent);
 void display_clear_buffer(void);
+
+// Refresh Waveform & Timing Settings
+enum gdey037t03_refresh_profile display_get_refresh_profile(void);
+void display_set_refresh_profile(enum gdey037t03_refresh_profile profile);
+void display_cycle_refresh_profile(void);
+
+uint8_t display_get_pulse_interval(void);
+void display_set_pulse_interval(uint8_t interval);
+void display_cycle_pulse_interval(void);
+
+uint8_t display_get_pulse_count(void);
+void display_set_pulse_count(uint8_t count);
+void display_cycle_pulse_count(void);
+
+const char *display_get_refresh_profile_name(void);
 
 #endif // DISPLAY_H

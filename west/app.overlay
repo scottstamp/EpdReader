@@ -7,53 +7,10 @@
 
     aliases {
         display0 = &epd0;
-        epd-cs = &epd_cs_pin;
-        epd-dc = &epd_dc_pin;
-        epd-rst = &epd_rst_pin;
-        epd-busy = &epd_busy_pin;
-        epd-vcc = &epd_vcc_pin;
 
         btn-prev = &button_prev;
         btn-next = &button_next;
         btn-select = &button_select;
-    };
-
-    epd0: gdey037t03 {
-        compatible = "gooddisplay,gdey037t03";
-        status = "okay";
-        height = <416>;
-        width = <240>;
-        cs-gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;
-        dc-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
-        reset-gpios = <&gpio0 17 GPIO_ACTIVE_LOW>;
-        busy-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
-        mosi-gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
-        sck-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
-        vcc-gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
-    };
-
-    epd_pins {
-        compatible = "gpio-keys";
-        epd_cs_pin: epd_cs {
-            gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;
-            label = "EPD CS";
-        };
-        epd_dc_pin: epd_dc {
-            gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
-            label = "EPD DC";
-        };
-        epd_rst_pin: epd_rst {
-            gpios = <&gpio0 17 GPIO_ACTIVE_LOW>;
-            label = "EPD RST";
-        };
-        epd_busy_pin: epd_busy {
-            gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
-            label = "EPD BUSY";
-        };
-        epd_vcc_pin: epd_vcc {
-            gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
-            label = "EPD VCC MOSFET";
-        };
     };
 
     buttons {
@@ -168,6 +125,28 @@
     };
 };
 
+&spi3 {
+    compatible = "nordic,nrf-spim";
+    status = "okay";
+    pinctrl-0 = <&spi3_default>;
+    pinctrl-1 = <&spi3_sleep>;
+    pinctrl-names = "default", "sleep";
+    cs-gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;
+
+    epd0: gdey037t03@0 {
+        compatible = "gooddisplay,gdey037t03";
+        reg = <0>;
+        spi-max-frequency = <8000000>;
+        status = "okay";
+        height = <416>;
+        width = <240>;
+        dc-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
+        reset-gpios = <&gpio0 17 GPIO_ACTIVE_LOW>;
+        busy-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
+        vcc-gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
+    };
+};
+
 &pinctrl {
     spi2_default: spi2_default {
         group1 {
@@ -182,6 +161,21 @@
             psels = <NRF_PSEL(SPIM_SCK, 1, 11)>,
                     <NRF_PSEL(SPIM_MOSI, 1, 0)>,
                     <NRF_PSEL(SPIM_MISO, 1, 15)>;
+            low-power-enable;
+        };
+    };
+
+    spi3_default: spi3_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 29)>,
+                    <NRF_PSEL(SPIM_MOSI, 0, 10)>;
+        };
+    };
+
+    spi3_sleep: spi3_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 29)>,
+                    <NRF_PSEL(SPIM_MOSI, 0, 10)>;
             low-power-enable;
         };
     };

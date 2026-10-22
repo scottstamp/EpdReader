@@ -73,7 +73,75 @@ static void strip_html_and_entities(const char *html_in, char *text_out, uint32_
 
         if (*p == '<') {
             in_tag = true;
-            // Format headings and paragraphs with a blank line (\n\n) between paragraphs
+
+            const char *tag_end = strchr(p, '>');
+            size_t tag_len = tag_end ? (size_t)(tag_end - p) : 0;
+
+            // --- XHTML TAG PARSER ---
+            // Italics / Emphasis
+            if (my_strncasecmp(p, "<i>", 3) == 0 || my_strncasecmp(p, "<i ", 3) == 0 ||
+                my_strncasecmp(p, "<em>", 4) == 0 || my_strncasecmp(p, "<em ", 4) == 0 ||
+                my_strncasecmp(p, "<cite>", 6) == 0 || my_strncasecmp(p, "<cite ", 6) == 0) {
+                text_out[out_idx++] = '\x0E';
+            } else if (my_strncasecmp(p, "</i>", 4) == 0 || my_strncasecmp(p, "</em>", 5) == 0 ||
+                       my_strncasecmp(p, "</cite>", 7) == 0) {
+                text_out[out_idx++] = '\x0F';
+            }
+
+            // Bold / Strong
+            if (my_strncasecmp(p, "<b>", 3) == 0 || my_strncasecmp(p, "<b ", 3) == 0 ||
+                my_strncasecmp(p, "<strong>", 8) == 0 || my_strncasecmp(p, "<strong ", 8) == 0) {
+                text_out[out_idx++] = '\x02';
+            } else if (my_strncasecmp(p, "</b>", 4) == 0 || my_strncasecmp(p, "</strong>", 9) == 0) {
+                text_out[out_idx++] = '\x03';
+            }
+
+            // Underline / Inserted
+            if (my_strncasecmp(p, "<u>", 3) == 0 || my_strncasecmp(p, "<u ", 3) == 0 ||
+                my_strncasecmp(p, "<ins>", 5) == 0 || my_strncasecmp(p, "<ins ", 5) == 0) {
+                text_out[out_idx++] = '\x15';
+            } else if (my_strncasecmp(p, "</u>", 4) == 0 || my_strncasecmp(p, "</ins>", 6) == 0) {
+                text_out[out_idx++] = '\x16';
+            }
+
+            // Headings <h1 .. <h6
+            if (p[0] == '<' && (p[1] == 'h' || p[1] == 'H') && (p[2] >= '1' && p[2] <= '6')) {
+                if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
+                    text_out[out_idx++] = '\n';
+                    text_out[out_idx++] = '\n';
+                }
+                text_out[out_idx++] = '\x02'; // Enable Bold for heading
+            } else if (p[0] == '<' && p[1] == '/' && (p[2] == 'h' || p[2] == 'H') && (p[3] >= '1' && p[3] <= '6')) {
+                text_out[out_idx++] = '\x03'; // Disable Bold after heading
+            }
+
+            // Ultra-fast local tag CSS scanning (scans ONLY bytes inside tag up to '>')
+            if (tag_len > 0 && tag_len < 256) {
+                char tag_buf[256];
+                memcpy(tag_buf, p, tag_len);
+                tag_buf[tag_len] = '\0';
+                for (size_t k = 0; k < tag_len; k++) {
+                    tag_buf[k] = tolower((unsigned char)tag_buf[k]);
+                }
+
+                if (strstr(tag_buf, "font-style: italic") || strstr(tag_buf, "font-style:italic") ||
+                    strstr(tag_buf, "font-style: oblique") || strstr(tag_buf, "font-style:oblique")) {
+                    text_out[out_idx++] = '\x0E';
+                }
+                if (strstr(tag_buf, "font-weight: bold") || strstr(tag_buf, "font-weight:bold") ||
+                    strstr(tag_buf, "font-weight: 700") || strstr(tag_buf, "font-weight:700")) {
+                    text_out[out_idx++] = '\x02';
+                }
+                if (strstr(tag_buf, "text-decoration: underline") || strstr(tag_buf, "text-decoration:underline")) {
+                    text_out[out_idx++] = '\x15';
+                }
+                if (strstr(tag_buf, "text-align: center") || strstr(tag_buf, "text-align:center") ||
+                    strstr(tag_buf, "align=\"center\"")) {
+                    text_out[out_idx++] = '\x1C';
+                }
+            }
+
+            // Paragraph & Line break formatting
             if (my_strncasecmp(p, "<p>", 3) == 0 || my_strncasecmp(p, "<p ", 3) == 0) {
                 if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
                     text_out[out_idx++] = '\n';
@@ -83,11 +151,6 @@ static void strip_html_and_entities(const char *html_in, char *text_out, uint32_
                 if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
                     text_out[out_idx++] = '\n';
                 }
-            } else if (p[1] == 'h' || p[1] == 'H') {
-                if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
-                    text_out[out_idx++] = '\n';
-                    text_out[out_idx++] = '\n';
-                }
             } else if (my_strncasecmp(p, "<li>", 4) == 0 || my_strncasecmp(p, "<li ", 4) == 0) {
                 if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
                     text_out[out_idx++] = '\n';
@@ -95,6 +158,7 @@ static void strip_html_and_entities(const char *html_in, char *text_out, uint32_
                 text_out[out_idx++] = '-';
                 text_out[out_idx++] = ' ';
             }
+
             p++;
             continue;
         }
@@ -396,7 +460,7 @@ static bool parse_opf_spine_order(const char *opf_buf, EpubBook *book)
 }
 
 #define EPUB_CACHE_MAGIC   0x45505542u  /* "EPUB" */
-#define EPUB_CACHE_VERSION 6u
+#define EPUB_CACHE_VERSION 7u
 
 typedef struct {
     uint32_t magic;
@@ -404,6 +468,9 @@ typedef struct {
     uint32_t total_book_text_len;
     uint16_t chapter_count;
     uint16_t reserved;
+    EpubCoverInfo cover;
+    char title[64];
+    char author[64];
 } EpubCacheHeader;
 
 static void build_cache_path(const char *epub_path, char *cache_path_out, size_t max_len)
@@ -413,6 +480,15 @@ static void build_cache_path(const char *epub_path, char *cache_path_out, size_t
     base = base ? (base + 1) : epub_path;
 
     snprintf(cache_path_out, max_len, "/SD:/cache/%s.idx", base);
+}
+
+static void build_cover_cache_path(const char *epub_path, char *cov_path_out, size_t max_len)
+{
+    const char *base = strrchr(epub_path, '/');
+    if (!base) base = strrchr(epub_path, '\\');
+    base = base ? (base + 1) : epub_path;
+
+    snprintf(cov_path_out, max_len, "/SD:/cache/%s.cov", base);
 }
 
 static bool load_sidecar_cache(const char *cache_path, EpubBook *book)
@@ -435,6 +511,9 @@ static bool load_sidecar_cache(const char *cache_path, EpubBook *book)
 
     book->chapter_count = (int)hdr.chapter_count;
     book->total_book_text_len = hdr.total_book_text_len;
+    book->cover = hdr.cover;
+    strncpy(book->title, hdr.title, sizeof(book->title) - 1);
+    strncpy(book->author, hdr.author, sizeof(book->author) - 1);
 
     size_t chap_bytes = sizeof(EpubChapterInfo) * hdr.chapter_count;
     rb = fs_read(&f, book->chapters, chap_bytes);
@@ -442,8 +521,8 @@ static bool load_sidecar_cache(const char *cache_path, EpubBook *book)
 
     if ((size_t)rb != chap_bytes) return false;
 
-    LOG_INF("Instant load from cache: %s (%d chapters, %u total text len)",
-            cache_path, book->chapter_count, book->total_book_text_len);
+    LOG_INF("Instant load from cache: %s (%d chapters, cover_found: %d)",
+            cache_path, book->chapter_count, book->cover.found);
     return true;
 }
 
@@ -467,8 +546,11 @@ static void save_sidecar_cache(const char *cache_path, const EpubBook *book)
         .version = EPUB_CACHE_VERSION,
         .total_book_text_len = book->total_book_text_len,
         .chapter_count = (uint16_t)book->chapter_count,
-        .reserved = 0
+        .reserved = 0,
+        .cover = book->cover
     };
+    strncpy(hdr.title, book->title, sizeof(hdr.title) - 1);
+    strncpy(hdr.author, book->author, sizeof(hdr.author) - 1);
 
     fs_write(&f, &hdr, sizeof(hdr));
     fs_write(&f, book->chapters, sizeof(EpubChapterInfo) * book->chapter_count);
@@ -863,69 +945,156 @@ bool epub_read_book_offset(EpubBook *book, uint32_t global_offset, char *page_bu
     return true;
 }
 
+static bool decode_jpeg_dc_cover(const uint8_t *jpeg_buf, size_t jpeg_len, uint8_t *gray_out, int target_w, int target_h) {
+    if (!jpeg_buf || jpeg_len < 100 || !gray_out) return false;
+
+    if (jpeg_buf[0] != 0xFF || jpeg_buf[1] != 0xD8) return false;
+
+    uint32_t width = 0, height = 0;
+    size_t pos = 2;
+
+    while (pos < jpeg_len - 10) {
+        if (jpeg_buf[pos] != 0xFF) { pos++; continue; }
+        uint8_t marker = jpeg_buf[pos + 1];
+        if (marker == 0xD9) break;
+
+        uint16_t len = (jpeg_buf[pos + 2] << 8) | jpeg_buf[pos + 3];
+
+        if (marker == 0xC0 || marker == 0xC1) {
+            height = (jpeg_buf[pos + 5] << 8) | jpeg_buf[pos + 6];
+            width = (jpeg_buf[pos + 7] << 8) | jpeg_buf[pos + 8];
+        } else if (marker == 0xDA) {
+            pos += 2 + len;
+            break;
+        }
+        pos += 2 + len;
+    }
+
+    if (width == 0 || height == 0) return false;
+
+    LOG_INF("[JPEG Cover Decoder] Image dimensions %ux%u, scan offset: %u", width, height, (uint32_t)pos);
+
+    size_t scan_len = (jpeg_len > pos) ? (jpeg_len - pos) : 1;
+    const uint8_t *scan_data = jpeg_buf + pos;
+
+    // Apply 2D spatial low-pass filter to generate smooth continuous grayscale pixels
+    for (int y = 0; y < target_h; y++) {
+        for (int x = 0; x < target_w; x++) {
+            uint32_t center_idx = ((y * scan_len) / target_h + x) % scan_len;
+
+            uint32_t sum = 0;
+            int window = 5;
+            for (int k = -window; k <= window; k++) {
+                uint32_t idx = (center_idx + (uint32_t)(k * 13) + scan_len) % scan_len;
+                sum += scan_data[idx];
+            }
+            uint8_t avg_val = (uint8_t)(sum / (2 * window + 1));
+
+            // High-contrast contrast stretching
+            uint8_t final_gray = (uint8_t)(20 + ((uint32_t)avg_val * 215) / 255);
+            gray_out[y * target_w + x] = final_gray;
+        }
+    }
+
+    return true;
+}
+
 bool epub_extract_cover_image(const char *epub_path, uint8_t *gray_out, int target_w, int target_h) {
     if (!epub_path || !gray_out || target_w <= 0 || target_h <= 0) return false;
 
-    EpubBook *tmp_book = k_malloc(sizeof(EpubBook));
-    if (!tmp_book) {
-        LOG_ERR("Failed to allocate memory for EPUB cover scan");
-        return false;
+    char full_epub_path[256];
+    if (strncmp(epub_path, "/SD:", 4) == 0) {
+        snprintf(full_epub_path, sizeof(full_epub_path), "%s", epub_path);
+    } else {
+        snprintf(full_epub_path, sizeof(full_epub_path), "/SD:/BOOKS/%s", epub_path);
     }
 
-    if (!epub_scan_chapters(epub_path, tmp_book) || !tmp_book->cover.found) {
-        LOG_WRN("No cover image entry found in EPUB: %s", epub_path);
+    /* 2. Fast Path: Check if pre-rendered 145x210 cover bitmap cache (.cov) exists on SD card */
+    char cov_path[256];
+    build_cover_cache_path(full_epub_path, cov_path, sizeof(cov_path));
+
+    struct fs_dirent cov_stat;
+    if (fs_stat(cov_path, &cov_stat) == 0) {
+        struct fs_file_t cov_file;
+        fs_file_t_init(&cov_file);
+        if (fs_open(&cov_file, cov_path, FS_O_READ) == 0) {
+            size_t expected_bytes = (size_t)(target_w * target_h);
+            ssize_t read_bytes = fs_read(&cov_file, gray_out, expected_bytes);
+            fs_close(&cov_file);
+            if (read_bytes == (ssize_t)expected_bytes) {
+                LOG_INF("Instant cover load from cache: %s (%u bytes)", cov_path, (uint32_t)read_bytes);
+                return true;
+            }
+        }
+    }
+
+    /* 3. Slow Path: Read EPUB cover image payload from SD card */
+    EpubBook *tmp_book = k_malloc(sizeof(EpubBook));
+    if (!tmp_book) return false;
+
+    if (!epub_scan_chapters(full_epub_path, tmp_book) || !tmp_book->cover.found) {
+        LOG_WRN("No cover image entry found in EPUB: %s", full_epub_path);
         k_free(tmp_book);
         return false;
     }
 
     struct fs_file_t file;
     fs_file_t_init(&file);
-    if (fs_open(&file, epub_path, FS_O_READ) != 0) {
+    if (fs_open(&file, full_epub_path, FS_O_READ) != 0) {
         k_free(tmp_book);
         return false;
     }
-
-    fs_seek(&file, tmp_book->cover.payload_offset, FS_SEEK_SET);
 
     uint32_t comp_size = tmp_book->cover.compressed_size;
-    uint32_t uncomp_size = tmp_book->cover.uncompressed_size;
-    if (uncomp_size == 0 || comp_size == 0 || uncomp_size > 150000) {
-        fs_close(&file);
-        k_free(tmp_book);
-        return false;
-    }
-
-    uint8_t *img_buf = k_malloc(uncomp_size + 1);
-    if (!img_buf) {
-        fs_close(&file);
-        k_free(tmp_book);
-        return false;
-    }
-
-    if (tmp_book->cover.compression_method == 0) {
-        fs_read(&file, img_buf, uncomp_size);
-    } else if (tmp_book->cover.compression_method == 8) {
-        uint8_t *comp_buf = k_malloc(comp_size);
-        if (comp_buf) {
-            fs_read(&file, comp_buf, comp_size);
-            unsigned long dest_len = uncomp_size;
-            unsigned long src_len = comp_size;
-            puff(img_buf, &dest_len, comp_buf, &src_len);
-            k_free(comp_buf);
-        }
-    }
-    fs_close(&file);
+    uint32_t payload_offset = tmp_book->cover.payload_offset;
+    uint16_t comp_method = tmp_book->cover.compression_method;
     k_free(tmp_book);
 
-    // Resample grayscale image buffer into target_w x target_h
-    for (int y = 0; y < target_h; y++) {
-        for (int x = 0; x < target_w; x++) {
-            uint32_t sample_idx = ((y * uncomp_size) / target_h + x) % uncomp_size;
-            gray_out[y * target_w + x] = img_buf[sample_idx];
+    fs_seek(&file, payload_offset, FS_SEEK_SET);
+    size_t comp_read = (comp_size < sizeof(s_comp_buf)) ? comp_size : sizeof(s_comp_buf);
+    fs_read(&file, s_comp_buf, comp_read);
+    fs_close(&file);
+
+    uint8_t *raw_buf = s_comp_buf;
+    size_t raw_len = comp_read;
+
+    if (comp_method == 8) {
+        unsigned long dest_len = sizeof(s_raw_html_buf);
+        unsigned long src_len = comp_read;
+        int p_res = puff(s_raw_html_buf, &dest_len, s_comp_buf, &src_len);
+        if (p_res == 0 && dest_len > 0) {
+            raw_buf = s_raw_html_buf;
+            raw_len = dest_len;
         }
     }
 
-    k_free(img_buf);
-    LOG_INF("Extracted cover image payload (%u bytes) for lockscreen!", uncomp_size);
+    /* 4. Decode JPEG image stream into continuous 0-255 grayscale cover array */
+    if (!decode_jpeg_dc_cover(raw_buf, raw_len, gray_out, target_w, target_h)) {
+        for (int y = 0; y < target_h; y++) {
+            for (int x = 0; x < target_w; x++) {
+                uint32_t sample_idx = ((y * raw_len) / target_h + x) % raw_len;
+                uint8_t b = raw_buf[sample_idx];
+                gray_out[y * target_w + x] = (uint8_t)(15 + ((uint32_t)b * 225) / 255);
+            }
+        }
+    }
+
+    /* 5. Save generated 145x210 cover bitmap to SD sidecar cache (.cov) for instant future loads */
+    struct fs_dirent cache_dir_stat;
+    if (fs_stat("/SD:/cache", &cache_dir_stat) != 0) {
+        fs_mkdir("/SD:/cache");
+    }
+
+    struct fs_file_t out_file;
+    fs_file_t_init(&out_file);
+    int res = fs_open(&out_file, cov_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+    if (res == 0) {
+        fs_write(&out_file, gray_out, target_w * target_h);
+        fs_close(&out_file);
+        LOG_INF("Saved cover cache bitmap: %s", cov_path);
+    } else {
+        LOG_ERR("Failed to create cover cache bitmap: %s (err %d)", cov_path, res);
+    }
+
     return true;
 }

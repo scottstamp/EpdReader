@@ -11,3 +11,5 @@ books
 scratch
 __pycache__
 west/build
+.cache
+compile_commands.json

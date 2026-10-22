@@ -13,6 +13,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/fs/fs.h>
 #include "display_gdey037t03.h"
 #include <string.h>
 #include <stdio.h>
@@ -45,6 +46,28 @@ int display_init(void) {
         return -ENODEV;
     }
     display_clear_buffer();
+
+    // Auto-detect & load custom font from SD card if present
+    struct fs_dirent fnt_stat;
+    if (fs_stat("/SD:/fonts/Bookerly.fnt", &fnt_stat) == 0) {
+        font_sd_load("/SD:/fonts/Bookerly.fnt");
+    } else if (fs_stat("/SD:/fonts/Arial.fnt", &fnt_stat) == 0) {
+        font_sd_load("/SD:/fonts/Arial.fnt");
+    }
+
+    // Load persisted waveform refresh settings from SD storage
+    int saved_prof = 0;
+    uint8_t saved_interval = 2;
+    uint8_t saved_count = 3;
+    if (storage_read_refresh_settings(&saved_prof, &saved_interval, &saved_count)) {
+        struct gdey037t03_refresh_config cfg = {
+            .profile = (enum gdey037t03_refresh_profile)saved_prof,
+            .pulse_interval = saved_interval,
+            .pulse_count = saved_count,
+        };
+        gdey037t03_set_refresh_config(epd_dev, &cfg);
+    }
+
     return 0;
 }
 
@@ -83,6 +106,110 @@ void display_cycle_spacing(void) { g_line_spacing = (LineSpacing)((g_line_spacin
 ContrastMode display_get_contrast(void) { return g_contrast_mode; }
 void display_app_set_contrast(ContrastMode mode) { g_contrast_mode = mode; }
 void display_cycle_contrast(void) { g_contrast_mode = (ContrastMode)((g_contrast_mode + 1) % 2); }
+
+enum gdey037t03_refresh_profile display_get_refresh_profile(void) {
+    struct gdey037t03_refresh_config cfg;
+    if (device_is_ready(epd_dev) && gdey037t03_get_refresh_config(epd_dev, &cfg) == 0) {
+        return cfg.profile;
+    }
+    return GDEY037T03_PROFILE_NORMAL;
+}
+
+void display_set_refresh_profile(enum gdey037t03_refresh_profile profile) {
+    struct gdey037t03_refresh_config cfg;
+    if (device_is_ready(epd_dev)) {
+        gdey037t03_get_refresh_config(epd_dev, &cfg);
+        cfg.profile = profile;
+        gdey037t03_set_refresh_config(epd_dev, &cfg);
+        storage_write_refresh_settings((int)cfg.profile, cfg.pulse_interval, cfg.pulse_count);
+    }
+}
+
+void display_cycle_refresh_profile(void) {
+    enum gdey037t03_refresh_profile prof = display_get_refresh_profile();
+    prof = (enum gdey037t03_refresh_profile)((prof + 1) % 4);
+    display_set_refresh_profile(prof);
+}
+
+uint8_t display_get_pulse_interval(void) {
+    struct gdey037t03_refresh_config cfg;
+    if (device_is_ready(epd_dev) && gdey037t03_get_refresh_config(epd_dev, &cfg) == 0) {
+        if (cfg.profile == GDEY037T03_PROFILE_NORMAL) return 2;
+        if (cfg.profile == GDEY037T03_PROFILE_FAST) return 2;
+        if (cfg.profile == GDEY037T03_PROFILE_TURBO) return 1;
+        return cfg.pulse_interval;
+    }
+    return 2;
+}
+
+void display_set_pulse_interval(uint8_t interval) {
+    struct gdey037t03_refresh_config cfg;
+    if (device_is_ready(epd_dev)) {
+        gdey037t03_get_refresh_config(epd_dev, &cfg);
+        cfg.pulse_interval = interval;
+        gdey037t03_set_refresh_config(epd_dev, &cfg);
+        storage_write_refresh_settings((int)cfg.profile, cfg.pulse_interval, cfg.pulse_count);
+    }
+}
+
+void display_cycle_pulse_interval(void) {
+    uint8_t cur = display_get_pulse_interval();
+    // Cycle: 1 -> 2 -> 3 -> 4 -> 6 -> 8 -> 10 -> 12 -> 15 -> 1
+    uint8_t next;
+    if (cur < 4) {
+        next = cur + 1;
+    } else if (cur == 4) {
+        next = 6;
+    } else if (cur == 6) {
+        next = 8;
+    } else if (cur == 8) {
+        next = 10;
+    } else if (cur == 10) {
+        next = 12;
+    } else if (cur == 12) {
+        next = 15;
+    } else {
+        next = 1;
+    }
+    display_set_pulse_interval(next);
+}
+
+uint8_t display_get_pulse_count(void) {
+    struct gdey037t03_refresh_config cfg;
+    if (device_is_ready(epd_dev) && gdey037t03_get_refresh_config(epd_dev, &cfg) == 0) {
+        if (cfg.profile == GDEY037T03_PROFILE_NORMAL) return 3;
+        if (cfg.profile == GDEY037T03_PROFILE_FAST) return 2;
+        if (cfg.profile == GDEY037T03_PROFILE_TURBO) return 1;
+        return cfg.pulse_count;
+    }
+    return 3;
+}
+
+void display_set_pulse_count(uint8_t count) {
+    struct gdey037t03_refresh_config cfg;
+    if (device_is_ready(epd_dev)) {
+        gdey037t03_get_refresh_config(epd_dev, &cfg);
+        cfg.pulse_count = count;
+        gdey037t03_set_refresh_config(epd_dev, &cfg);
+        storage_write_refresh_settings((int)cfg.profile, cfg.pulse_interval, cfg.pulse_count);
+    }
+}
+
+void display_cycle_pulse_count(void) {
+    uint8_t cur = display_get_pulse_count();
+    uint8_t next = (cur >= 4) ? 1 : (cur + 1);
+    display_set_pulse_count(next);
+}
+
+const char *display_get_refresh_profile_name(void) {
+    switch (display_get_refresh_profile()) {
+        case GDEY037T03_PROFILE_NORMAL: return "Normal";
+        case GDEY037T03_PROFILE_FAST:   return "Fast";
+        case GDEY037T03_PROFILE_TURBO:  return "Turbo";
+        case GDEY037T03_PROFILE_CUSTOM: return "Custom";
+        default: return "Normal";
+    }
+}
 
 static const GFXfont* get_active_reader_font(void) {
     if (g_font_type == FONT_SANS) {
@@ -288,13 +415,15 @@ static uint8_t decode_utf8_char(const char **pp) {
     return ' ';
 }
 
-static int display_draw_gfx_char_raw(int x, int y, uint8_t c, const GFXfont *font, uint8_t color) {
+static int display_draw_gfx_char_styled(int x, int y, uint8_t c, const GFXfont *font, uint8_t color, bool is_italic, bool is_bold, bool is_underline) {
+    if (c < 32) return 0;
+
     const uint8_t *bitmap = NULL;
-    const GFXglyph *glyph = font_get_glyph((uint32_t)c, font, &bitmap);
+    const GFXglyph *glyph = font_get_glyph_styled((uint32_t)c, is_bold, is_italic, font, &bitmap);
 
     if (!glyph) {
         c = '?';
-        glyph = font_get_glyph((uint32_t)c, font, &bitmap);
+        glyph = font_get_glyph_styled((uint32_t)c, is_bold, is_italic, font, &bitmap);
         if (!glyph) return 0;
     }
 
@@ -307,27 +436,67 @@ static int display_draw_gfx_char_raw(int x, int y, uint8_t c, const GFXfont *fon
     uint8_t  bits = 0, bit = 0;
 
     for (int yy = 0; yy < h; yy++) {
+        int slant = is_italic ? ((h - yy) / 3) : 0;
         for (int xx = 0; xx < w; xx++) {
             if (!(bit++ & 7)) {
                 bits = bitmap[bo++];
             }
             if (bits & 0x80) {
-                display_draw_pixel(x + xo + xx, y + yo + yy, color);
+                int px = x + xo + xx + slant;
+                int py = y + yo + yy;
+                display_draw_pixel(px, py, color);
+                if (is_bold) {
+                    display_draw_pixel(px + 1, py, color);
+                    display_draw_pixel(px, py + 1, color);
+                    display_draw_pixel(px + 1, py + 1, color);
+                }
             }
             bits <<= 1;
         }
     }
-    return glyph->xAdvance;
+
+    if (is_underline) {
+        int ul_y = y + 2;
+        int adv = glyph->xAdvance;
+        for (int ix = 0; ix < adv; ix++) {
+            display_draw_pixel(x + ix, ul_y, color);
+        }
+    }
+
+    return glyph->xAdvance + (is_bold ? 1 : 0);
+}
+
+static int display_draw_gfx_string_styled(int x, int y, const uint8_t *str, int len, const GFXfont *font, uint8_t color, bool *in_italic, bool *in_bold, bool *in_underline) {
+    int cur_x = x;
+    for (int i = 0; i < len; i++) {
+        uint8_t c = str[i];
+        if (c == '\x0E') { *in_italic = true; continue; }
+        if (c == '\x0F') { *in_italic = false; continue; }
+        if (c == '\x02') { *in_bold = true; continue; }
+        if (c == '\x03') { *in_bold = false; continue; }
+        if (c == '\x15') { *in_underline = true; continue; }
+        if (c == '\x16') { *in_underline = false; continue; }
+        if (c == '\x1C') { continue; }
+
+        cur_x += display_draw_gfx_char_styled(cur_x, y, c, font, color, *in_italic, *in_bold, *in_underline);
+    }
+    return cur_x - x;
+}
+
+static int display_draw_gfx_char_raw(int x, int y, uint8_t c, const GFXfont *font, uint8_t color) {
+    bool it = false, bd = false, ul = false;
+    return display_draw_gfx_char_styled(x, y, c, font, color, it, bd, ul);
 }
 
 static int display_draw_gfx_string_raw(int x, int y, const char *str, const GFXfont *font, uint8_t color) {
     int cur_x = x;
     const char *p = str;
+    bool it = false, bd = false, ul = false;
 
     while (*p) {
         uint8_t c = decode_utf8_char(&p);
         if (c == 0) break;
-        cur_x += display_draw_gfx_char_raw(cur_x, y, c, font, color);
+        cur_x += display_draw_gfx_char_styled(cur_x, y, c, font, color, it, bd, ul);
     }
     return cur_x - x;
 }
@@ -407,24 +576,42 @@ void display_draw_menu(const char *title, const char *options[], int count, int 
 void display_draw_menu_ext(const char *title, const char *sub_footer, const char *options[], int count, int selected_idx) {
     display_clear_buffer();
 
-    // Compact Top Bar Header
-    display_draw_gfx_string(10, 15, title, &AmazonEmber_Medium9pt7b, 0);
+    char header_buf[64];
+    if (count > 6) {
+        snprintf(header_buf, sizeof(header_buf), "%s (%d/%d)", title, selected_idx + 1, count);
+    } else {
+        snprintf(header_buf, sizeof(header_buf), "%s", title);
+    }
+
+    display_draw_gfx_string(10, 15, header_buf, &AmazonEmber_Medium9pt7b, 0);
     display_draw_battery(battery_get_percentage());
     display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
 
-    // Menu Item Rendering with Inverted Solid Black Background Box for Active Item
-    int start_y = 44;
-    int item_height = (count > 6) ? 22 : 26;
+    int max_visible = 10;
+    int scroll_top = 0;
+    if (count > max_visible) {
+        if (selected_idx >= max_visible - 1) {
+            scroll_top = selected_idx - (max_visible - 2);
+        }
+        if (scroll_top + max_visible > count) {
+            scroll_top = count - max_visible;
+        }
+        if (scroll_top < 0) scroll_top = 0;
+    }
 
-    for (int i = 0; i < count; i++) {
-        int y = start_y + (i * item_height);
+    int visible_count = (count < max_visible) ? count : max_visible;
+    int start_y = 38;
+    int item_height = 21;
+
+    for (int v = 0; v < visible_count; v++) {
+        int i = scroll_top + v;
+        if (i >= count) break;
+
+        int y = start_y + (v * item_height);
         if (i == selected_idx) {
-            // Solid Black Selection Bar
-            display_fill_rect(6, y - 16, EPD_WIDTH - 12, 22, 0);
-            // White Text on Black Bar
+            display_fill_rect(6, y - 14, EPD_WIDTH - 12, 19, 0);
             display_draw_gfx_string(16, y, options[i], &AmazonEmber_Medium12pt7b, 1);
         } else {
-            // Normal Black Text on White Background
             display_draw_gfx_string(16, y, options[i], &AmazonEmber_Medium12pt7b, 0);
         }
     }
@@ -485,17 +672,25 @@ void display_draw_atkinson_dithered(int dst_x, int dst_y, int target_w, int targ
 
             display_draw_pixel(dst_x + x, dst_y + y, (new_val == 0) ? 0 : 1);
 
-            if (x + 1 < target_w)                       err_buf[r0][x + 1] += err;
-            if (x + 2 < target_w)                       err_buf[r0][x + 2] += err;
-            if (x - 1 >= 0)                             err_buf[r1][x - 1] += err;
-                                                        err_buf[r1][x]     += err;
-            if (x + 1 < target_w)                       err_buf[r1][x + 1] += err;
-                                                        err_buf[r2][x]     += err;
+            if (x + 1 < target_w) {
+                err_buf[r0][x + 1] += err;
+            }
+            if (x + 2 < target_w) {
+                err_buf[r0][x + 2] += err;
+            }
+            if (x - 1 >= 0) {
+                err_buf[r1][x - 1] += err;
+            }
+            err_buf[r1][x] += err;
+            if (x + 1 < target_w) {
+                err_buf[r1][x + 1] += err;
+            }
+            err_buf[r2][x] += err;
         }
     }
 }
 
-void display_draw_lockscreen(const char *book_name, const char *title, const char *author, uint32_t progress_pct) {
+void display_draw_lockscreen(const char *book_name, const char *title, const char *author, const char *chapter_title, uint32_t progress_pct) {
     display_clear_buffer();
 
     int cover_x = 15;
@@ -507,66 +702,130 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
     bool has_cover = false;
 
     if (book_name && book_name[0] != '\0') {
-        storage_get_book_metadata(book_name, NULL, 0, NULL, 0);
-        has_cover = epub_extract_cover_image(book_name, cover_gray_buf, cover_w, cover_h);
+        char full_book_path[256];
+        if (strncmp(book_name, "/SD:", 4) == 0) {
+            snprintf(full_book_path, sizeof(full_book_path), "%s", book_name);
+        } else {
+            snprintf(full_book_path, sizeof(full_book_path), "/SD:/BOOKS/%s", book_name);
+        }
+        has_cover = epub_extract_cover_image(full_book_path, cover_gray_buf, cover_w, cover_h);
     }
 
     if (has_cover) {
-        display_draw_atkinson_dithered(cover_x, cover_y, cover_w, cover_h, cover_gray_buf, cover_w, cover_h);
-        display_draw_rect(cover_x, cover_y, cover_w, cover_h, 0);
-    } else {
-        display_draw_rect(cover_x, cover_y, cover_w, cover_h, 0);
-        display_draw_rect(cover_x + 3, cover_y + 3, cover_w - 6, cover_h - 6, 0);
-
-        display_fill_rect(cover_x + 8, cover_y + 12, cover_w - 16, 20, 0);
-        display_draw_gfx_string(cover_x + 14, cover_y + 26, "EPUB BOOK", &AmazonEmber_Medium9pt7b, 1);
-
-        char title_buf[32];
-        if (strlen(title) > 18) {
-            snprintf(title_buf, sizeof(title_buf), "%.15s...", title);
-        } else {
-            snprintf(title_buf, sizeof(title_buf), "%s", title);
-        }
-        display_draw_gfx_string(cover_x + 12, cover_y + 75, title_buf, &AmazonEmber_Medium12pt7b, 0);
-
-        if (author && author[0]) {
-            char author_buf[32];
-            if (strlen(author) > 20) {
-                snprintf(author_buf, sizeof(author_buf), "%.17s...", author);
-            } else {
-                snprintf(author_buf, sizeof(author_buf), "%s", author);
+        // --- LAYOUT A: WITH .COV COVER BITMAP ---
+        bool is_binary = true;
+        for (int i = 0; i < cover_w * cover_h; i++) {
+            uint8_t v = cover_gray_buf[i];
+            if (v > 10 && v < 245) {
+                is_binary = false;
+                break;
             }
-            display_draw_gfx_string(cover_x + 12, cover_y + 105, author_buf, &AmazonEmber_Medium9pt7b, 0);
         }
+
+        if (is_binary) {
+            for (int y = 0; y < cover_h; y++) {
+                for (int x = 0; x < cover_w; x++) {
+                    uint8_t val = cover_gray_buf[y * cover_w + x];
+                    display_draw_pixel(cover_x + x, cover_y + y, (val < 128) ? 0 : 1);
+                }
+            }
+        } else {
+            display_draw_atkinson_dithered(cover_x, cover_y, cover_w, cover_h, cover_gray_buf, cover_w, cover_h);
+        }
+        display_draw_rect(cover_x, cover_y, cover_w, cover_h, 0);
+
+        // Right Half Metadata Panel (x=175 to EPD_WIDTH)
+        int right_x = 175;
+
+        // Solid SLEEP MODE badge
+        display_fill_rect(right_x, 15, 120, 22, 0);
+        display_draw_gfx_string(right_x + 10, 31, "SLEEP MODE", &AmazonEmber_Medium9pt7b, 1);
+
+        // Title
+        if (title && title[0]) {
+            display_draw_gfx_string(right_x, 70, title, &AmazonEmber_Medium12pt7b, 0);
+        }
+
+        // Author
+        if (author && author[0]) {
+            display_draw_gfx_string(right_x, 98, author, &AmazonEmber_Medium9pt7b, 0);
+        }
+
+        // Chapter
+        if (chapter_title && chapter_title[0]) {
+            char chap_buf[48];
+            if (strlen(chapter_title) > 24) {
+                snprintf(chap_buf, sizeof(chap_buf), "%.21s...", chapter_title);
+            } else {
+                snprintf(chap_buf, sizeof(chap_buf), "%s", chapter_title);
+            }
+            display_draw_gfx_string(right_x, 130, chap_buf, &AmazonEmber_Medium9pt7b, 0);
+        }
+
+        // Progress percentage
+        char prog_str[32];
+        snprintf(prog_str, sizeof(prog_str), "Progress: %u%%", progress_pct);
+        display_draw_gfx_string(right_x, 158, prog_str, &AmazonEmber_Medium9pt7b, 0);
+
+        // Divider line
+        display_fill_rect(right_x, 178, EPD_WIDTH - right_x - 15, 1, 0);
+
+        // Wake hint & Battery
+        display_draw_gfx_string(right_x, 205, "Press button to wake", &AmazonEmber_Medium9pt7b, 0);
+        display_draw_battery(battery_get_percentage());
+
+    } else {
+        // --- LAYOUT B: FULL WIDTH TEXT LOCKSCREEN (NO FAUX COVER BOX) ---
+        int left_x = 20;
+
+        // Solid SLEEP MODE badge (top left)
+        display_fill_rect(left_x, 18, 120, 22, 0);
+        display_draw_gfx_string(left_x + 10, 34, "SLEEP MODE", &AmazonEmber_Medium9pt7b, 1);
+
+        // Top right battery indicator
+        display_draw_battery(battery_get_percentage());
+
+        // Full width divider line
+        display_fill_rect(0, 48, EPD_WIDTH, 1, 0);
+
+        // Title (Full Width 12pt)
+        if (title && title[0]) {
+            display_draw_gfx_string(left_x, 85, title, &AmazonEmber_Medium12pt7b, 0);
+        } else if (book_name && book_name[0]) {
+            display_draw_gfx_string(left_x, 85, book_name, &AmazonEmber_Medium12pt7b, 0);
+        } else {
+            display_draw_gfx_string(left_x, 85, "e-Paper Reader", &AmazonEmber_Medium12pt7b, 0);
+        }
+
+        // Author (Full Width 9pt)
+        if (author && author[0]) {
+            char author_buf[64];
+            snprintf(author_buf, sizeof(author_buf), "By %s", author);
+            display_draw_gfx_string(left_x, 115, author_buf, &AmazonEmber_Medium9pt7b, 0);
+        }
+
+        // Current Chapter (Full Width 9pt)
+        if (chapter_title && chapter_title[0]) {
+            display_draw_gfx_string(left_x, 145, chapter_title, &AmazonEmber_Medium9pt7b, 0);
+        }
+
+        // Progress bar & Percentage
+        char prog_str[32];
+        snprintf(prog_str, sizeof(prog_str), "Reading Progress: %u%%", progress_pct);
+        display_draw_gfx_string(left_x, 178, prog_str, &AmazonEmber_Medium9pt7b, 0);
+
+        // Progress Bar Line
+        int bar_w = EPD_WIDTH - 40;
+        display_draw_rect(left_x, 188, bar_w, 8, 0);
+        int fill_w = (bar_w - 4) * progress_pct / 100;
+        if (fill_w > 0) {
+            display_fill_rect(left_x + 2, 190, fill_w, 4, 0);
+        }
+
+        // Wake hint bottom bar
+        display_draw_gfx_string(left_x, 222, "Press any button to wake", &AmazonEmber_Medium9pt7b, 0);
     }
 
-    // 2. Right Half Metadata Panel (x=180 to 406)
-    int right_x = 180;
-
-    // Solid SLEEP MODE badge
-    display_fill_rect(right_x, 25, 120, 22, 0);
-    display_draw_gfx_string(right_x + 10, 41, "SLEEP MODE", &AmazonEmber_Medium9pt7b, 1);
-
-    // Title
-    display_draw_gfx_string(right_x, 85, title, &AmazonEmber_Medium12pt7b, 0);
-
-    // Author
-    if (author && author[0]) {
-        display_draw_gfx_string(right_x, 115, author, &AmazonEmber_Medium9pt7b, 0);
-    }
-
-    // Progress percentage
-    char prog_str[32];
-    snprintf(prog_str, sizeof(prog_str), "Progress: %u%%", progress_pct);
-    display_draw_gfx_string(right_x, 155, prog_str, &AmazonEmber_Medium9pt7b, 0);
-
-    // Divider line
-    display_fill_rect(right_x, 175, EPD_WIDTH - right_x - 10, 1, 0);
-
-    // Wake hint
-    display_draw_gfx_string(right_x, 205, "Press any button to wake", &AmazonEmber_Medium9pt7b, 0);
-
-    // Execute full OTP refresh on e-Paper glass
     display_update(true);
 }
 
@@ -589,6 +848,10 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
 
     int cur_y = margin_top;
     int max_y = margin_bottom - font_height + 4;
+
+    bool page_italic = false;
+    bool page_bold = false;
+    bool page_underline = false;
 
     const char *p = text_page;
     const char *page_start = text_page;
@@ -638,9 +901,12 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
                 uint8_t c = decode_utf8_char(&p);
                 if (c == 0) break;
 
-                uint16_t glyph_idx = (c >= active_font->first && c <= active_font->last) ?
-                                     (c - active_font->first) : ('?' - active_font->first);
-                int adv = active_font->glyph[glyph_idx].xAdvance;
+                int adv = 0;
+                if (c >= 32) {
+                    uint16_t glyph_idx = (c >= active_font->first && c <= active_font->last) ?
+                                         (c - active_font->first) : ('?' - active_font->first);
+                    adv = active_font->glyph[glyph_idx].xAdvance;
+                }
 
                 decoded_word[word_len++] = c;
                 word_width += adv;
@@ -658,9 +924,12 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
                     while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
                         const char *before_char = p;
                         uint8_t c = decode_utf8_char(&p);
-                        uint16_t glyph_idx = (c >= active_font->first && c <= active_font->last) ?
-                                             (c - active_font->first) : ('?' - active_font->first);
-                        int adv = active_font->glyph[glyph_idx].xAdvance;
+                        int adv = 0;
+                        if (c >= 32) {
+                            uint16_t glyph_idx = (c >= active_font->first && c <= active_font->last) ?
+                                                 (c - active_font->first) : ('?' - active_font->first);
+                            adv = active_font->glyph[glyph_idx].xAdvance;
+                        }
                         if (chunk_w + adv + hyphen_adv > max_width) {
                             p = before_char;
                             line_buf[line_len++] = '-';
@@ -685,7 +954,7 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
 
         line_buf[line_len] = 0;
         if (line_len > 0) {
-            display_draw_gfx_string_raw(margin_left, cur_y, line_buf, active_font, 0);
+            display_draw_gfx_string_styled(margin_left, cur_y, line_buf, line_len, active_font, 0, &page_italic, &page_bold, &page_underline);
             cur_y += line_height;
         } else {
             if (p == line_start_p && *p) p++;

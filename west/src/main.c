@@ -23,6 +23,7 @@ typedef enum {
     STATE_READER,
     STATE_READER_MENU,
     STATE_FONT_SETTINGS,
+    STATE_REFRESH_SETTINGS,
     STATE_LOCKSCREEN,
     STATE_STATS,
     STATE_BLE_UPLOAD,
@@ -58,6 +59,7 @@ static int selected_menu_idx = 0;
 
 static int selected_reader_menu_idx = 0;
 static int selected_font_menu_idx = 0;
+static int selected_refresh_menu_idx = 0;
 
 static SystemState pre_sleep_state = STATE_MENU;
 
@@ -103,21 +105,44 @@ static void render_current_state(void) {
                 session_start_ms = k_uptime_get_32();
             }
 
-            char display_title[64];
-            storage_get_book_display_title(active_book, display_title, sizeof(display_title));
+            if (current_epub.chapter_count == 0 && active_book[0] != '\0') {
+                char path[256];
+                snprintf(path, sizeof(path), "/SD:/BOOKS/%s", active_book);
+                epub_scan_chapters(path, &current_epub);
+            }
+
+            char chapter_header[64] = "Reader";
+            if (current_epub.chapter_count > 0) {
+                int cur_idx = 0;
+                for (int i = 0; i < current_epub.chapter_count; i++) {
+                    uint32_t start_off = current_epub.chapters[i].cum_offset;
+                    uint32_t end_off = start_off + current_epub.chapters[i].text_length;
+                    if (current_page_offset >= start_off && current_page_offset < end_off) {
+                        cur_idx = i;
+                        break;
+                    }
+                }
+                if (current_epub.chapters[cur_idx].title[0] != '\0') {
+                    snprintf(chapter_header, sizeof(chapter_header), "%s", current_epub.chapters[cur_idx].title);
+                } else {
+                    snprintf(chapter_header, sizeof(chapter_header), "Chapter %d", cur_idx + 1);
+                }
+            } else {
+                storage_get_book_display_title(active_book, chapter_header, sizeof(chapter_header));
+            }
 
             char page_buf[1024] = {0};
             uint32_t bytes_read = 0;
 
             bool ok = storage_read_book_page(active_book, current_page_offset, page_buf, sizeof(page_buf), &bytes_read);
             if (!ok || bytes_read == 0) {
-                display_draw_message(display_title[0] ? display_title : "Reader Error", "Could not read book file!\nCheck SD card", true);
+                display_draw_message(chapter_header, "Could not read book file!\nCheck SD card", true);
             } else {
                 uint32_t file_size = storage_get_book_size(active_book);
                 uint32_t progress_pct = (file_size > 0) ? ((current_page_offset * 100) / file_size) : 0;
                 if (progress_pct > 100) progress_pct = 100;
 
-                last_page_bytes_read = display_draw_reader_page(display_title, page_buf, progress_pct);
+                last_page_bytes_read = display_draw_reader_page(chapter_header, page_buf, progress_pct);
                 if (last_page_bytes_read == 0) last_page_bytes_read = 300;
             }
             break;
@@ -138,6 +163,9 @@ static void render_current_state(void) {
             uint32_t session_sec = (session_start_ms > 0) ? ((k_uptime_get_32() - session_start_ms) / 1000) : 0;
             format_session_time(session_sec, session_str, sizeof(session_str));
 
+            char refresh_opt[32];
+            snprintf(refresh_opt, sizeof(refresh_opt), "Refresh: %s", display_get_refresh_profile_name());
+
             char flip_str[32];
             snprintf(flip_str, sizeof(flip_str), "Orientation: %s", display_is_flipped() ? "Flipped" : "Normal");
 
@@ -145,13 +173,14 @@ static void render_current_state(void) {
                 "Resume Reading",
                 "Select Chapter",
                 "Font Settings",
+                refresh_opt,
                 flip_str,
                 "Refresh Display",
                 "Lock Screen",
                 "Exit to Main Menu"
             };
 
-            display_draw_menu_ext(header_str, session_str, reader_options, 7, selected_reader_menu_idx);
+            display_draw_menu_ext(header_str, session_str, reader_options, 8, selected_reader_menu_idx);
             break;
         }
 
@@ -198,6 +227,42 @@ static void render_current_state(void) {
             break;
         }
 
+        case STATE_REFRESH_SETTINGS: {
+            char prof_str[32];
+            snprintf(prof_str, sizeof(prof_str), "Profile: %s", display_get_refresh_profile_name());
+
+            char int_str[32];
+            snprintf(int_str, sizeof(int_str), "Pulse Interval: %u", display_get_pulse_interval());
+
+            char cnt_str[32];
+            snprintf(cnt_str, sizeof(cnt_str), "Pulse Count: %u", display_get_pulse_count());
+
+            enum gdey037t03_refresh_profile prof = display_get_refresh_profile();
+            int menu_count = 0;
+            const char *refresh_options[5];
+
+            refresh_options[menu_count++] = prof_str;
+            if (prof == GDEY037T03_PROFILE_CUSTOM) {
+                refresh_options[menu_count++] = int_str;
+                refresh_options[menu_count++] = cnt_str;
+            }
+            refresh_options[menu_count++] = "[Back]";
+
+            const char *help_footer = NULL;
+            if (prof == GDEY037T03_PROFILE_NORMAL) {
+                help_footer = "Normal: Timing 2, 3 pulses - crisp & fast";
+            } else if (prof == GDEY037T03_PROFILE_FAST) {
+                help_footer = "Fast: Timing 2, 1 pulse - ~30 FPS high-speed";
+            } else if (prof == GDEY037T03_PROFILE_TURBO) {
+                help_footer = "Turbo: Timing 1, 1 pulse - ~45 FPS ultra-speed";
+            } else {
+                help_footer = "Custom: Tune pulse interval & pulse count";
+            }
+
+            display_draw_menu_ext("Refresh Settings", help_footer, refresh_options, menu_count, selected_refresh_menu_idx);
+            break;
+        }
+
         case STATE_LOCKSCREEN: {
             char title[64] = {0};
             char author[64] = {0};
@@ -208,11 +273,29 @@ static void render_current_state(void) {
                 snprintf(author, sizeof(author), "nRF52840 Zephyr");
             }
 
+            char chapter_header[64] = "";
+            if (current_epub.chapter_count > 0) {
+                int cur_idx = 0;
+                for (int i = 0; i < current_epub.chapter_count; i++) {
+                    uint32_t start_off = current_epub.chapters[i].cum_offset;
+                    uint32_t end_off = start_off + current_epub.chapters[i].text_length;
+                    if (current_page_offset >= start_off && current_page_offset < end_off) {
+                        cur_idx = i;
+                        break;
+                    }
+                }
+                if (current_epub.chapters[cur_idx].title[0] != '\0') {
+                    snprintf(chapter_header, sizeof(chapter_header), "%s", current_epub.chapters[cur_idx].title);
+                } else {
+                    snprintf(chapter_header, sizeof(chapter_header), "Chapter %d", cur_idx + 1);
+                }
+            }
+
             uint32_t file_size = active_book[0] ? storage_get_book_size(active_book) : 0;
             uint32_t progress_pct = (file_size > 0) ? ((current_page_offset * 100) / file_size) : 0;
             if (progress_pct > 100) progress_pct = 100;
 
-            display_draw_lockscreen(active_book, title, author, progress_pct);
+            display_draw_lockscreen(active_book, title, author, chapter_header, progress_pct);
 
             // Save pre-sleep state to storage so wake-up restores exact view
             storage_write_sleep_state((int)pre_sleep_state, selected_menu_idx, active_book);
@@ -332,10 +415,14 @@ int main(void) {
                         render_current_state();
                     }
                 } else if (current_state == STATE_READER_MENU) {
-                    selected_reader_menu_idx = (selected_reader_menu_idx > 0) ? selected_reader_menu_idx - 1 : 6;
+                    selected_reader_menu_idx = (selected_reader_menu_idx > 0) ? selected_reader_menu_idx - 1 : 7;
                     render_current_state();
                 } else if (current_state == STATE_FONT_SETTINGS) {
                     selected_font_menu_idx = (selected_font_menu_idx > 0) ? selected_font_menu_idx - 1 : 4;
+                    render_current_state();
+                } else if (current_state == STATE_REFRESH_SETTINGS) {
+                    int max_opts = (display_get_refresh_profile() == GDEY037T03_PROFILE_CUSTOM) ? 4 : 2;
+                    selected_refresh_menu_idx = (selected_refresh_menu_idx > 0) ? selected_refresh_menu_idx - 1 : max_opts - 1;
                     render_current_state();
                 }
                 break;
@@ -359,10 +446,14 @@ int main(void) {
                         render_current_state();
                     }
                 } else if (current_state == STATE_READER_MENU) {
-                    selected_reader_menu_idx = (selected_reader_menu_idx + 1) % 7;
+                    selected_reader_menu_idx = (selected_reader_menu_idx + 1) % 8;
                     render_current_state();
                 } else if (current_state == STATE_FONT_SETTINGS) {
                     selected_font_menu_idx = (selected_font_menu_idx + 1) % 5;
+                    render_current_state();
+                } else if (current_state == STATE_REFRESH_SETTINGS) {
+                    int max_opts = (display_get_refresh_profile() == GDEY037T03_PROFILE_CUSTOM) ? 4 : 2;
+                    selected_refresh_menu_idx = (selected_refresh_menu_idx + 1) % max_opts;
                     render_current_state();
                 }
                 break;
@@ -415,20 +506,32 @@ int main(void) {
                         char path[256];
                         snprintf(path, sizeof(path), "/SD:/BOOKS/%s", active_book);
                         epub_scan_chapters(path, &current_epub);
-                        selected_chapter_idx = 0;
+                        int cur_idx = 0;
+                        for (int i = 0; i < current_epub.chapter_count; i++) {
+                            uint32_t start_off = current_epub.chapters[i].cum_offset;
+                            uint32_t end_off = start_off + current_epub.chapters[i].text_length;
+                            if (current_page_offset >= start_off && current_page_offset < end_off) {
+                                cur_idx = i;
+                                break;
+                            }
+                        }
+                        selected_chapter_idx = cur_idx;
                         current_state = STATE_CHAPTER_LIST;
                     } else if (selected_reader_menu_idx == 2) { // Font Settings
                         selected_font_menu_idx = 0;
                         current_state = STATE_FONT_SETTINGS;
-                    } else if (selected_reader_menu_idx == 3) { // Orientation
+                    } else if (selected_reader_menu_idx == 3) { // Refresh Settings
+                        selected_refresh_menu_idx = 0;
+                        current_state = STATE_REFRESH_SETTINGS;
+                    } else if (selected_reader_menu_idx == 4) { // Orientation
                         display_set_flipped(!display_is_flipped());
-                    } else if (selected_reader_menu_idx == 4) { // Refresh
+                    } else if (selected_reader_menu_idx == 5) { // Refresh
                         display_update(true);
                         current_state = STATE_READER;
-                    } else if (selected_reader_menu_idx == 5) { // Lockscreen
+                    } else if (selected_reader_menu_idx == 6) { // Lockscreen
                         pre_sleep_state = STATE_READER;
                         current_state = STATE_LOCKSCREEN;
-                    } else if (selected_reader_menu_idx == 6) { // Exit to main menu
+                    } else if (selected_reader_menu_idx == 7) { // Exit to main menu
                         current_state = STATE_MENU;
                     }
                     render_current_state();
@@ -452,6 +555,19 @@ int main(void) {
                         current_state = STATE_READER_MENU;
                     }
                     render_current_state();
+                } else if (current_state == STATE_REFRESH_SETTINGS) {
+                    enum gdey037t03_refresh_profile prof = display_get_refresh_profile();
+                    if (selected_refresh_menu_idx == 0) {
+                        display_cycle_refresh_profile();
+                        selected_refresh_menu_idx = 0;
+                    } else if (prof == GDEY037T03_PROFILE_CUSTOM && selected_refresh_menu_idx == 1) {
+                        display_cycle_pulse_interval();
+                    } else if (prof == GDEY037T03_PROFILE_CUSTOM && selected_refresh_menu_idx == 2) {
+                        display_cycle_pulse_count();
+                    } else {
+                        current_state = STATE_READER_MENU;
+                    }
+                    render_current_state();
                 } else if (current_state == STATE_LOCKSCREEN || current_state == STATE_STATS ||
                            current_state == STATE_BLE_UPLOAD || current_state == STATE_USB_STORAGE) {
                     current_state = STATE_MENU;
@@ -464,7 +580,8 @@ int main(void) {
                 break;
 
             case BTN_EVENT_SELECT_LONG_PRESS:
-                if (current_state == STATE_READER || current_state == STATE_READER_MENU || current_state == STATE_FONT_SETTINGS) {
+                if (current_state == STATE_READER || current_state == STATE_READER_MENU ||
+                    current_state == STATE_FONT_SETTINGS || current_state == STATE_REFRESH_SETTINGS) {
                     current_state = STATE_MENU;
                     render_current_state();
                 } else {

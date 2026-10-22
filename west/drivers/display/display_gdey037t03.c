@@ -16,59 +16,67 @@ LOG_MODULE_REGISTER(gdey037t03, CONFIG_DISPLAY_LOG_LEVEL);
 #define EPD_BUFFER_SIZE ((EPD_PHYS_WIDTH / 8) * EPD_PHYS_HEIGHT)
 
 struct gdey037t03_config {
+    struct spi_dt_spec spi;
     struct gpio_dt_spec dc_gpio;
     struct gpio_dt_spec reset_gpio;
     struct gpio_dt_spec busy_gpio;
     struct gpio_dt_spec vcc_gpio;
-    struct gpio_dt_spec cs_gpio;
-    struct gpio_dt_spec mosi_gpio;
-    struct gpio_dt_spec sck_gpio;
 };
+
+#ifndef CONFIG_GDEY037T03_DEFAULT_REFRESH_PROFILE
+#define CONFIG_GDEY037T03_DEFAULT_REFRESH_PROFILE 0
+#endif
+#ifndef CONFIG_GDEY037T03_CUSTOM_PULSE_INTERVAL
+#define CONFIG_GDEY037T03_CUSTOM_PULSE_INTERVAL 10
+#endif
+#ifndef CONFIG_GDEY037T03_CUSTOM_PULSE_COUNT
+#define CONFIG_GDEY037T03_CUSTOM_PULSE_COUNT 1
+#endif
 
 struct gdey037t03_data {
     enum display_orientation orientation;
     bool force_full_refresh;
+    bool is_powered_on;
+    struct gdey037t03_refresh_config refresh_cfg;
 };
-
-static inline void spi_delay(void) {
-    __NOP();
-}
-
-static void epd_spi_write_byte(const struct gdey037t03_config *config, uint8_t data) {
-    for (int i = 7; i >= 0; i--) {
-        if (data & (1 << i)) {
-            gpio_pin_set_dt(&config->mosi_gpio, 1);
-        } else {
-            gpio_pin_set_dt(&config->mosi_gpio, 0);
-        }
-        gpio_pin_set_dt(&config->sck_gpio, 1);
-        spi_delay();
-        gpio_pin_set_dt(&config->sck_gpio, 0);
-        spi_delay();
-    }
-}
 
 static void epd_write_cmd(const struct gdey037t03_config *config, uint8_t cmd) {
     gpio_pin_set_dt(&config->dc_gpio, 0); // DC = Command (0)
-    gpio_pin_set_dt(&config->cs_gpio, 1); // CS = Select Chip (Logical 1 -> Physical LOW for ACTIVE_LOW)
-    epd_spi_write_byte(config, cmd);
-    gpio_pin_set_dt(&config->cs_gpio, 0); // CS = Deselect Chip (Logical 0 -> Physical HIGH for ACTIVE_LOW)
+    struct spi_buf buf = {
+        .buf = &cmd,
+        .len = 1,
+    };
+    struct spi_buf_set tx = {
+        .buffers = &buf,
+        .count = 1,
+    };
+    spi_write_dt(&config->spi, &tx);
 }
 
 static void epd_write_data(const struct gdey037t03_config *config, uint8_t data) {
     gpio_pin_set_dt(&config->dc_gpio, 1); // DC = Data (1)
-    gpio_pin_set_dt(&config->cs_gpio, 1); // CS = Select Chip
-    epd_spi_write_byte(config, data);
-    gpio_pin_set_dt(&config->cs_gpio, 0); // CS = Deselect Chip
+    struct spi_buf buf = {
+        .buf = &data,
+        .len = 1,
+    };
+    struct spi_buf_set tx = {
+        .buffers = &buf,
+        .count = 1,
+    };
+    spi_write_dt(&config->spi, &tx);
 }
 
 static void epd_write_data_bytes(const struct gdey037t03_config *config, const uint8_t *data, size_t len) {
-    gpio_pin_set_dt(&config->dc_gpio, 1);
-    gpio_pin_set_dt(&config->cs_gpio, 1);
-    for (size_t i = 0; i < len; i++) {
-        epd_spi_write_byte(config, data[i]);
-    }
-    gpio_pin_set_dt(&config->cs_gpio, 0);
+    gpio_pin_set_dt(&config->dc_gpio, 1); // DC = Data (1)
+    struct spi_buf buf = {
+        .buf = (void *)data,
+        .len = len,
+    };
+    struct spi_buf_set tx = {
+        .buffers = &buf,
+        .count = 1,
+    };
+    spi_write_dt(&config->spi, &tx);
 }
 
 static void epd_wait_busy(const struct gdey037t03_config *config, const char *stage_name, int timeout_ms) {
@@ -122,20 +130,19 @@ static void epd_power_off_chip(const struct gdey037t03_config *config) {
 static int gdey037t03_init(const struct device *dev) {
     const struct gdey037t03_config *config = dev->config;
 
+    if (!spi_is_ready_dt(&config->spi)) {
+        LOG_ERR("SPI device not ready");
+        return -ENODEV;
+    }
+
     if (config->vcc_gpio.port) {
         gpio_pin_configure_dt(&config->vcc_gpio, GPIO_OUTPUT_ACTIVE); // Power ON (Active LOW -> Physical 0)
         k_msleep(50);
     }
 
-    gpio_pin_configure_dt(&config->cs_gpio, GPIO_OUTPUT_INACTIVE); // Deselected (Physical 1)
     gpio_pin_configure_dt(&config->dc_gpio, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_INACTIVE); // Released (Physical 1)
-    gpio_pin_configure_dt(&config->mosi_gpio, GPIO_OUTPUT_INACTIVE);
-    gpio_pin_configure_dt(&config->sck_gpio, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&config->busy_gpio, GPIO_INPUT);
-
-    gpio_pin_set_dt(&config->cs_gpio, 0); // Deselected
-    gpio_pin_set_dt(&config->sck_gpio, 0); // Clock Low
 
     // Hardware Reset Sequence: Assert Reset (Physical 0) for 20ms, then Release Reset (Physical 1) for 50ms
     gpio_pin_set_dt(&config->reset_gpio, 1);
@@ -146,13 +153,37 @@ static int gdey037t03_init(const struct device *dev) {
     epd_wait_busy(config, "InitReset", 1000);
     epd_init_display(config);
 
-    LOG_INF("GDEY037T03 (UC8253) e-Paper driver initialized cleanly");
+    LOG_INF("GDEY037T03 (UC8253) e-Paper driver initialized on Hardware SPIM3");
     return 0;
 }
 
 void gdey037t03_request_full_refresh(const struct device *dev) {
     struct gdey037t03_data *data = dev->data;
     data->force_full_refresh = true;
+}
+
+int gdey037t03_set_refresh_config(const struct device *dev, const struct gdey037t03_refresh_config *cfg) {
+    if (!dev || !cfg) {
+        return -EINVAL;
+    }
+    struct gdey037t03_data *data = dev->data;
+    data->refresh_cfg = *cfg;
+    if (data->refresh_cfg.pulse_interval < 1) data->refresh_cfg.pulse_interval = 1;
+    if (data->refresh_cfg.pulse_interval > 15) data->refresh_cfg.pulse_interval = 15;
+    if (data->refresh_cfg.pulse_count < 1) data->refresh_cfg.pulse_count = 1;
+    if (data->refresh_cfg.pulse_count > 5) data->refresh_cfg.pulse_count = 5;
+    LOG_INF("EPD Refresh config: profile=%d, interval=%u, count=%u",
+            data->refresh_cfg.profile, data->refresh_cfg.pulse_interval, data->refresh_cfg.pulse_count);
+    return 0;
+}
+
+int gdey037t03_get_refresh_config(const struct device *dev, struct gdey037t03_refresh_config *cfg) {
+    if (!dev || !cfg) {
+        return -EINVAL;
+    }
+    const struct gdey037t03_data *data = dev->data;
+    *cfg = data->refresh_cfg;
+    return 0;
 }
 
 static int gdey037t03_write(const struct device *dev, const uint16_t x, const uint16_t y,
@@ -173,6 +204,8 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
     }
 
     if (full) {
+        data->is_powered_on = false;
+
         // Stream target frame to RAM 0x13
         epd_write_cmd(config, 0x91);
         epd_set_partial_ram_area(config, 0, 0, EPD_PHYS_WIDTH, EPD_PHYS_HEIGHT);
@@ -206,20 +239,90 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
         epd_write_data_bytes(config, buf, desc->buf_size);
         epd_write_cmd(config, 0x92);
 
-        // Fast 0.3s Partial Refresh with 0x6E, 0xD7
-        epd_write_cmd(config, 0xE0);
-        epd_write_data(config, 0x02);
-        epd_write_cmd(config, 0xE5);
-        epd_write_data(config, 0x6E);
+        uint8_t t = 2;
+        uint8_t rp = 3;
+
+        if (data->refresh_cfg.profile == GDEY037T03_PROFILE_NORMAL) {
+            t = 2;
+            rp = 3;
+        } else if (data->refresh_cfg.profile == GDEY037T03_PROFILE_FAST) {
+            t = 2;
+            rp = 2;
+        } else if (data->refresh_cfg.profile == GDEY037T03_PROFILE_TURBO) {
+            t = 1;
+            rp = 1;
+        } else { // GDEY037T03_PROFILE_CUSTOM
+            t = data->refresh_cfg.pulse_interval;
+            if (t < 1) t = 1;
+            if (t > 15) t = 15;
+            rp = data->refresh_cfg.pulse_count;
+            if (rp < 1) rp = 1;
+            if (rp > 5) rp = 5;
+        }
+
+        uint8_t lut_vcom[56] = {0};
+        uint8_t lut_ww[42] = {0};
+        uint8_t lut_bw[56] = {0};
+        uint8_t lut_wb[42] = {0};
+        uint8_t lut_bb[42] = {0};
+
+        uint8_t v_white = 0x80 | (t & 0x0F); // Drive white (VSL polarity)
+        uint8_t v_black = 0x40 | (t & 0x0F); // Drive black (VSH polarity)
+
+        // True Differential Partial Refresh:
+        // - lut_ww (0x21) = 0: Unchanged white pixels receive 0V (no invert, no background flash)
+        // - lut_bb (0x24) = 0: Unchanged black pixels receive 0V (no flicker)
+        // - lut_vcom (0x20)= 0: VCOM stays neutral
+        // - lut_bw (0x22) drives erased black pixels back to white
+        // - lut_wb (0x23) drives newly rendered pixels to black
+
+        // LUT 0x22 (BW): Transition Black -> White (clearing previous text)
+        lut_bw[0] = 0x01;
+        lut_bw[1] = v_white;
+        lut_bw[2] = v_white;
+        lut_bw[3] = v_white;
+        lut_bw[4] = v_white;
+        lut_bw[5] = (rp < 5) ? (rp + 1) : rp; // Extra pulse to overcome VSL rail asymmetry and fully erase black
+        lut_bw[6] = 0x01;
+
+        // LUT 0x23 (WB): Transition White -> Black (drawing new text)
+        lut_wb[0] = 0x01;
+        lut_wb[1] = v_black;
+        lut_wb[2] = v_black;
+        lut_wb[3] = v_black;
+        lut_wb[4] = v_black;
+        lut_wb[5] = rp;
+        lut_wb[6] = 0x01;
+
+        // Panel setting: 0xFF (enable register LUTs)
+        epd_write_cmd(config, 0x00);
+        epd_write_data(config, 0xFF);
+
+        // VCOM and Data Interval Setting (CDI): 0xD7
         epd_write_cmd(config, 0x50);
         epd_write_data(config, 0xD7);
+
+        // Write full register LUT banks
+        epd_write_cmd(config, 0x20);
+        epd_write_data_bytes(config, lut_vcom, sizeof(lut_vcom));
+
+        epd_write_cmd(config, 0x21);
+        epd_write_data_bytes(config, lut_ww, sizeof(lut_ww));
+
+        epd_write_cmd(config, 0x22);
+        epd_write_data_bytes(config, lut_bw, sizeof(lut_bw));
+
+        epd_write_cmd(config, 0x23);
+        epd_write_data_bytes(config, lut_wb, sizeof(lut_wb));
+
+        epd_write_cmd(config, 0x24);
+        epd_write_data_bytes(config, lut_bb, sizeof(lut_bb));
 
         epd_power_on_chip(config);
         epd_write_cmd(config, 0x12);
         epd_wait_busy(config, "UpdatePart", 1000);
-        k_msleep(150);
+        k_msleep(60);
         epd_power_off_chip(config);
-
         epd_init_display(config);
 
         // Stream frame to previous RAM (0x10)
@@ -296,15 +399,18 @@ static const struct display_driver_api gdey037t03_driver_api = {
     static struct gdey037t03_data gdey037t03_data_##inst = {                       \
         .orientation = DISPLAY_ORIENTATION_ROTATED_270,                            \
         .force_full_refresh = true,                                                 \
+        .refresh_cfg = {                                                            \
+            .profile = (enum gdey037t03_refresh_profile)CONFIG_GDEY037T03_DEFAULT_REFRESH_PROFILE, \
+            .pulse_interval = CONFIG_GDEY037T03_CUSTOM_PULSE_INTERVAL,              \
+            .pulse_count = CONFIG_GDEY037T03_CUSTOM_PULSE_COUNT,                    \
+        },                                                                          \
     };                                                                              \
                                                                                     \
     static const struct gdey037t03_config gdey037t03_config_##inst = {             \
+        .spi = SPI_DT_SPEC_INST_GET(inst, SPI_OP_MODE_MASTER | SPI_WORD_SET(8), 0), \
         .dc_gpio = GPIO_DT_SPEC_INST_GET(inst, dc_gpios),                          \
         .reset_gpio = GPIO_DT_SPEC_INST_GET(inst, reset_gpios),                    \
         .busy_gpio = GPIO_DT_SPEC_INST_GET(inst, busy_gpios),                      \
-        .cs_gpio = GPIO_DT_SPEC_INST_GET(inst, cs_gpios),                          \
-        .mosi_gpio = GPIO_DT_SPEC_INST_GET(inst, mosi_gpios),                      \
-        .sck_gpio = GPIO_DT_SPEC_INST_GET(inst, sck_gpios),                        \
         .vcc_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, vcc_gpios, {0}),                 \
     };                                                                              \
                                                                                     \

@@ -5,3 +5,32 @@ menuconfig DISPLAY_GDEY037T03
 	select DISPLAY_HAS_PIXEL_FORMAT_MONO10
 	help
 	  Enable driver for Good Display GDEY037T03 3.7" e-Paper display (UC8253 controller).
+
+if DISPLAY_GDEY037T03
+
+config GDEY037T03_DEFAULT_REFRESH_PROFILE
+	int "Default partial refresh profile (0=Normal, 1=Fast, 2=Turbo, 3=Custom)"
+	default 0
+	range 0 3
+	help
+	  Default refresh profile for the GDEY037T03 display.
+	  0 = Normal (pulse interval 2, 3 pulses, minimal ghosting)
+	  1 = Fast (pulse interval 2, 2 pulses, light ghosting)
+	  2 = Turbo (pulse interval 1, 1 pulse, max FPS)
+	  3 = Custom (user defined pulse interval and pulse count)
+
+config GDEY037T03_CUSTOM_PULSE_INTERVAL
+	int "Custom pulse timing interval (frames/cycles)"
+	default 2
+	range 1 15
+	help
+	  Pulse timing duration (T1..T4) when Custom profile is active.
+
+config GDEY037T03_CUSTOM_PULSE_COUNT
+	int "Custom pulse repetition count"
+	default 3
+	range 1 5
+	help
+	  Number of pulse drive repetitions (Repeat count / RP).
+
+endif

@@ -476,3 +476,47 @@ bool storage_write_sleep_state(int state, int menu_idx, const char *active_book)
 void storage_clear_sleep_state(void) {
     fs_unlink(SLEEP_STATE_FILE);
 }
+
+#define REFRESH_SETTINGS_FILE SD_MOUNT_POINT "/refresh.txt"
+
+bool storage_read_refresh_settings(int *profile, uint8_t *interval, uint8_t *count) {
+    struct fs_dirent entry;
+    if (fs_stat(REFRESH_SETTINGS_FILE, &entry) != 0) return false;
+
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    if (fs_open(&file, REFRESH_SETTINGS_FILE, FS_O_READ) != 0) return false;
+
+    char line[64] = {0};
+    int bytes = fs_read(&file, line, sizeof(line) - 1);
+    fs_close(&file);
+    if (bytes <= 0) return false;
+    line[bytes] = '\0';
+
+    // Format: "%d:%u:%u\n"
+    char *c1 = strchr(line, ':');
+    if (!c1) return false;
+    *c1 = '\0';
+    *profile = atoi(line);
+
+    char *c2 = strchr(c1 + 1, ':');
+    if (!c2) return false;
+    *c2 = '\0';
+    *interval = (uint8_t)atoi(c1 + 1);
+    *count = (uint8_t)atoi(c2 + 1);
+
+    return true;
+}
+
+bool storage_write_refresh_settings(int profile, uint8_t interval, uint8_t count) {
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    if (fs_open(&file, REFRESH_SETTINGS_FILE, FS_O_CREATE | FS_O_WRITE) != 0) return false;
+
+    char line[64];
+    int len = snprintf(line, sizeof(line), "%d:%u:%u\n", profile, interval, count);
+    fs_write(&file, line, len);
+    fs_close(&file);
+    return true;
+}
+

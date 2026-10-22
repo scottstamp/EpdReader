@@ -23,4 +23,7 @@ bool storage_read_sleep_state(int *state, int *menu_idx, char *active_book);
 bool storage_write_sleep_state(int state, int menu_idx, const char *active_book);
 void storage_clear_sleep_state(void);
 
+bool storage_read_refresh_settings(int *profile, uint8_t *interval, uint8_t *count);
+bool storage_write_refresh_settings(int profile, uint8_t interval, uint8_t count);
+
 #endif // STORAGE_H
