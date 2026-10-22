@@ -1,5 +1,7 @@
-#pragma once
-#include <Adafruit_GFX.h>
+#ifndef BOOKERLY_12PT7B_H
+#define BOOKERLY_12PT7B_H
+
+#include "gfxfont.h"
 
 const uint8_t Bookerly12pt7bBitmaps[] PROGMEM = {
     0x39, 0x8C, 0x63, 0x18, 0xC6, 0x31, 0x8C, 0x00, 0x18, 0xC0, 0x6C, 0xD9,
@@ -254,3 +256,5 @@ const GFXfont Bookerly12pt7b PROGMEM = {
     0x20, 0x83,
     25
 };
+
+#endif // BOOKERLY_12PT7B_H

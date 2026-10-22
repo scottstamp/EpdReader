@@ -1,5 +1,7 @@
-#pragma once
-#include <Adafruit_GFX.h>
+#ifndef AMAZON_EMBER_MEDIUM_9PT7B_H
+#define AMAZON_EMBER_MEDIUM_9PT7B_H
+
+#include "gfxfont.h"
 
 const uint8_t AmazonEmber_Medium9pt7bBitmaps[] PROGMEM = {
     0x66, 0x66, 0x64, 0x40, 0x66, 0x6D, 0xB6, 0xD2, 0x00, 0x00, 0x00, 0x00,
@@ -191,3 +193,5 @@ const GFXfont AmazonEmber_Medium9pt7b PROGMEM = {
     0x20, 0x83,
     18
 };
+
+#endif // AMAZON_EMBER_MEDIUM_9PT7B_H

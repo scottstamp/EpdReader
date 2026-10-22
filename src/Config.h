@@ -1,97 +1,31 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-// --- E-Paper Display Pins (SPI + Control) ---
-#define EPD_CS 33   // Maps to physical D10 (P0.09)
-#define EPD_DC 28   // Maps to physical D3 (P0.20) - DC relocated here
-#define EPD_RST 29  // Maps to physical D2 (P0.17) - RST relocated here
-#define EPD_BUSY 23 // Maps to physical D7 (P0.11)
+#include <zephyr/kernel.h>
+#include <stdbool.h>
+#include <stdint.h>
 
-// --- Dedicated SD Card Pins (SPI2 / SPIM2) ---
-#define SD_CS 35    // Maps to physical D8 (P1.13)
-#define SD_MISO 3   // Maps to physical D9 (P1.15)
-#define SD_MOSI 36  // Maps to physical D6 (P1.00)
-#define SD_SCK 37   // Maps to physical P1.11
+// --- E-Paper Display Dimensions (GDEY037T03 3.7" E-Paper) ---
+#define EPD_PHYS_WIDTH  240
+#define EPD_PHYS_HEIGHT 416
+#define EPD_BUFFER_SIZE ((EPD_PHYS_WIDTH * EPD_PHYS_HEIGHT) / 8) // 12,480 bytes
 
-// --- E-Paper Display SPI Pins (SPI1 / SPIM1) ---
-#define EPD_MISO 3  // Maps to physical D9 (P1.15)
-#define EPD_MOSI 2  // Maps to physical D16 (P0.10)
-#define EPD_SCK 20  // Maps to physical D20 (P0.29)
+// Logical Landscape UI Dimensions
+#define EPD_WIDTH  416
+#define EPD_HEIGHT 240
 
-// --- Hardware Button Pins ---
-// Connect buttons between the pin and GND. The firmware uses internal pull-ups.
-#define PIN_BTN_PREV 18 // Maps to physical D19 (P0.02) - Swapped in code to match hardware
-#define PIN_BTN_NEXT                                                           \
-  1 // Maps to physical D5 (P0.24) - Mapped to correct Index 1
-#define PIN_BTN_SELECT                                                         \
-  30 // Maps to physical D4 (P0.22) - Swapped in code to match hardware
+// --- System Settings ---
+#define MAX_BOOKS 10
+#define MAX_CHAPTERS 100
+#define HISTORY_SIZE 64
+#define AUTO_SLEEP_MS 300000 // 5 minutes inactivity timeout
+#define EPD_FULL_REFRESH_INTERVAL 20
 
-// --- E-Paper Display Configuration ---
-#define EPAPER_3COLOR                                                          \
-  false // Set to false to run the 3-color panel in ultra-fast B&W mode with bypassed Red RAM
-#define DISPLAY_ROTATION 1 // 1 = Landscape (416x240), 3 = Inverted Landscape
-#define EPD_FULL_REFRESH_INTERVAL 20 // Do a full refresh every N page turns to clear ghosting
-
-// --- Storage & Paging Engine Settings ---
-#define MAX_BOOKS 10    // Maximum books stored in flash
-#define MAX_CHAPTERS 100 // Maximum chapters in a book
-#define HISTORY_SIZE 64 // Size of circular page offset cache (saves RAM)
-#define BOOK_DIR "/books"
-#define PROGRESS_FILE "/progress.dat"
-#define TOTAL_FS_SIZE                                                          \
-  (64 * 1024) // Total space allocated for InternalFS on nice!nano (64KB)
-
-// --- Battery Monitoring ---
-#define PIN_BATTERY A0 // Maps to physical P0.04 (AIN2) which is A0 on Feather
-#define BATTERY_DIVIDER 2.0f // 1/2 voltage divider on nice!nano battery pin
-
-// --- Power Control Settings ---
-// Set to true if you have verified that Pin 13 controls your display's VCC
-// MOSFET. Set to false to bypass Pin 13 control and keep the display powered
-// permanently (safer default).
-#define ENABLE_VCC_CONTROL true
-#define PIN_VCC_ON 13 // VCC Power control pin
-
-// --- System Auto-Sleep Timeout ---
-#define AUTO_SLEEP_MS                                                          \
-  300000 // 5 minutes of inactivity before deep sleep (system-off/light-sleep)
-  // 15000 // 15 seconds of inactivity before deep sleep (system-off/light-sleep)
-
-// --- USB Serial Sleep Block ---
-// When true, the device will NOT enter deep sleep while a USB Serial console
-// is open (useful for live debugging without the device powering down on you).
-// Set to false if you want the device to auto-sleep even with the Serial monitor attached.
-#define ENABLE_USB_SLEEP_BLOCK false
-
-// --- Serial Logging Control ---
-// Set to false to completely stub out Serial logs for faster boot times
-#define ENABLE_SERIAL_LOGGING false
-
-#if !ENABLE_SERIAL_LOGGING
-#include <Arduino.h>
-class StubSerialClass : public Print {
-public:
-    inline void begin(unsigned long) {}
-    inline void end() {}
-    inline int available() { return 0; }
-    inline int read() { return -1; }
-    inline void flush() {}
-    inline size_t readBytes(uint8_t* buffer, size_t length) { (void)buffer; (void)length; return 0; }
-    inline size_t readBytes(char* buffer, size_t length) { (void)buffer; (void)length; return 0; }
-    inline String readStringUntil(char c) { (void)c; return ""; }
-    inline operator bool() { return true; }
-    inline size_t write(uint8_t val) override { (void)val; return 1; }
-    inline size_t write(const uint8_t* buffer, size_t size) override { (void)buffer; return size; }
-    
-    template <typename T> inline size_t print(T val) { (void)val; return 0; }
-    template <typename T, typename U> inline size_t print(T val, U format) { (void)val; (void)format; return 0; }
-    template <typename T> inline size_t println(T val) { (void)val; return 0; }
-    template <typename T, typename U> inline size_t println(T val, U format) { (void)val; (void)format; return 0; }
-    inline size_t println() { return 0; }
-};
-
-extern StubSerialClass dummySerial;
-#define Serial dummySerial
-#endif
+// Path mountpoints
+#define SD_MOUNT_POINT "/SD:"
+#define LFS_MOUNT_POINT "/lfs:"
+#define BOOK_DIR "/SD:/books"
+#define PROGRESS_FILE "/SD:/progress.dat"
+#define STATS_FILE "/SD:/stats.dat"
 
 #endif // CONFIG_H
