@@ -50,7 +50,7 @@ def convert_font(font_path, pixel_size, font_name_c):
     chars_to_convert.append((131, '…')) # ellipsis
 
     for code, char in chars_to_convert:
-        mask, offset = font1x.getmask2(char, mode="1", anchor="ls")
+        mask, offset = font1x.getmask2(char, mode="L", anchor="ls")
         w, h = mask.size
         
         if w == 0 or h == 0:
@@ -67,11 +67,19 @@ def convert_font(font_path, pixel_size, font_name_c):
             yOffset = offset[1]
             xAdvance = int(round(font1x.getlength(char)))
             
+            # Quantize 0-255 to 0-3 (coverage level: 0 = transparent, 1 = 33%, 2 = 66%, 3 = 100%)
             pixels = []
             for y in range(height):
                 for x in range(width):
                     val = mask.getpixel((x, y))
-                    pixels.append(1 if val > 0 else 0)
+                    if val < 50:
+                        pixels.append(0)
+                    elif val < 130:
+                        pixels.append(1)
+                    elif val < 210:
+                        pixels.append(2)
+                    else:
+                        pixels.append(3)
             
             # Baseline alignment correction
             last_row = -1
@@ -87,13 +95,13 @@ def convert_font(font_path, pixel_size, font_name_c):
                     shift = base_bottom - pixel_bottom
                     yOffset += shift
             
-        # Pack bits (1 bit per pixel, MSB-first)
+        # Pack bits (2 bits per pixel)
         glyph_bytes = []
         current_byte = 0
         bit_count = 0
         for pixel in pixels:
-            current_byte = (current_byte << 1) | pixel
-            bit_count += 1
+            current_byte = (current_byte << 2) | pixel
+            bit_count += 2
             if bit_count == 8:
                 glyph_bytes.append(current_byte)
                 current_byte = 0
@@ -119,7 +127,7 @@ def convert_font(font_path, pixel_size, font_name_c):
     # Format output code
     out = []
     out.append("#pragma once")
-    out.append('#include <Adafruit_GFX.h>')
+    out.append('#include "GrayscaleFont.h"')
     out.append("")
     out.append(f"const uint8_t {font_name_c}Bitmaps[] PROGMEM = {{")
     
@@ -132,7 +140,7 @@ def convert_font(font_path, pixel_size, font_name_c):
     out.append("};")
     out.append("")
     
-    out.append(f"const GFXglyph {font_name_c}Glyphs[] PROGMEM = {{")
+    out.append(f"const GrayscaleGlyph {font_name_c}Glyphs[] PROGMEM = {{")
     glyph_lines = []
     for g in glyphs:
         comment = f"// 0x{g['code']:02X} '{g['char']}'" if g['code'] != 0x5C else f"// 0x{g['code']:02X} '\\'"
@@ -141,9 +149,9 @@ def convert_font(font_path, pixel_size, font_name_c):
     out.append("};")
     out.append("")
     
-    out.append(f"const GFXfont {font_name_c} PROGMEM = {{")
+    out.append(f"const GrayscaleFont {font_name_c} PROGMEM = {{")
     out.append(f"    (uint8_t *){font_name_c}Bitmaps,")
-    out.append(f"    (GFXglyph *){font_name_c}Glyphs,")
+    out.append(f"    (GrayscaleGlyph *){font_name_c}Glyphs,")
     out.append(f"    0x20, 0x{glyphs[-1]['code']:02X},")
     out.append(f"    {yAdvance}")
     out.append("};")
