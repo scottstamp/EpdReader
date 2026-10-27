@@ -8,6 +8,7 @@ zephyr_compile_definitions(CONFIG_NFCT_PINS_AS_GPIOS)
 target_include_directories(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/drivers/display
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/tjpgd
 )
 
 target_sources(app PRIVATE
@@ -24,4 +25,5 @@ target_sources(app PRIVATE
     src/html_text.c
     src/epub.c
     src/font_extended.c
+    src/third_party/tjpgd/tjpgd.c
 )
