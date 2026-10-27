@@ -21,7 +21,7 @@ int display_write(const struct device *dev, uint16_t x, uint16_t y,
 void gdey037t03_request_full_refresh(const struct device *dev) { (void)dev; }
 int gdey037t03_set_refresh_config(const struct device *dev, const struct gdey037t03_refresh_config *cfg) { (void)dev; (void)cfg; return 0; }
 int gdey037t03_get_refresh_config(const struct device *dev, struct gdey037t03_refresh_config *cfg) {
-    (void)dev; cfg->profile = GDEY037T03_PROFILE_NORMAL; cfg->pulse_interval = 2; cfg->pulse_count = 3; return 0;
+    (void)dev; cfg->profile = GDEY037T03_PROFILE_NORMAL; cfg->pulse_interval = 2; cfg->pulse_count = 3; cfg->frame_rate = 0; return 0;
 }
 uint8_t battery_get_percentage(void) { return 85; }
 const EpubBook *storage_get_epub(const char *n) { (void)n; return NULL; }

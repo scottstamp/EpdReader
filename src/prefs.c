@@ -2,6 +2,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/logging/log.h>
+#include <stddef.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(prefs, LOG_LEVEL_INF);
@@ -12,9 +13,14 @@ LOG_MODULE_REGISTER(prefs, LOG_LEVEL_INF);
 static Prefs s_stored;
 static bool s_found;
 
+// Size written by firmware before frame_rate was added
+#define PREFS_V1_SIZE offsetof(Prefs, frame_rate)
+BUILD_ASSERT(PREFS_V1_SIZE == 12, "the old Prefs layout must stay a prefix");
+
 static int prefs_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg) {
-    if (strcmp(name, PREFS_NAME) == 0 && len == sizeof(Prefs)) {
-        if (read_cb(cb_arg, &s_stored, sizeof(Prefs)) == sizeof(Prefs)) {
+    if (strcmp(name, PREFS_NAME) == 0 && (len == sizeof(Prefs) || len == PREFS_V1_SIZE)) {
+        memset(&s_stored, 0, sizeof(s_stored));
+        if (read_cb(cb_arg, &s_stored, len) == (ssize_t)len) {
             s_found = true;
         }
     }

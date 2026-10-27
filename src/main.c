@@ -296,8 +296,8 @@ static void update_reading_time(bool still_reading) {
 
 static void save_prefs(void) {
     enum gdey037t03_refresh_profile profile;
-    uint8_t interval, count;
-    display_get_refresh_config(&profile, &interval, &count);
+    uint8_t interval, count, frame_rate;
+    display_get_refresh_config(&profile, &interval, &count, &frame_rate);
 
     Prefs prefs = {
         .font = (uint8_t)display_get_font(),
@@ -309,6 +309,7 @@ static void save_prefs(void) {
         .pulse_interval = interval,
         .pulse_count = count,
         .reading_seconds = total_reading_seconds,
+        .frame_rate = frame_rate,
     };
     prefs_save(&prefs);
 }
@@ -323,7 +324,7 @@ static void load_prefs(void) {
         display_set_flipped(prefs.flipped != 0);
         if (prefs.refresh_profile <= GDEY037T03_PROFILE_CUSTOM) {
             display_set_refresh_config((enum gdey037t03_refresh_profile)prefs.refresh_profile,
-                                       prefs.pulse_interval, prefs.pulse_count);
+                                       prefs.pulse_interval, prefs.pulse_count, prefs.frame_rate);
         }
         total_reading_seconds = prefs.reading_seconds;
     } else {
@@ -332,7 +333,7 @@ static void load_prefs(void) {
         uint8_t interval, count;
         if (storage_read_refresh_settings(&profile, &interval, &count) &&
             profile >= 0 && profile <= GDEY037T03_PROFILE_CUSTOM) {
-            display_set_refresh_config((enum gdey037t03_refresh_profile)profile, interval, count);
+            display_set_refresh_config((enum gdey037t03_refresh_profile)profile, interval, count, 0);
         }
         storage_read_stats(&total_reading_seconds);
         save_prefs();
@@ -538,6 +539,14 @@ static void render_current_state(void) {
             char cnt_str[32];
             snprintf(cnt_str, sizeof(cnt_str), "Pulse Count: %u", display_get_pulse_count());
 
+            char fr_str[32];
+            uint8_t frame_rate = display_get_frame_rate();
+            if (frame_rate) {
+                snprintf(fr_str, sizeof(fr_str), "Frame Rate: %u Hz", frame_rate);
+            } else {
+                snprintf(fr_str, sizeof(fr_str), "Frame Rate: Default");
+            }
+
             enum gdey037t03_refresh_profile prof = display_get_refresh_profile();
             int menu_count = 0;
             const char *refresh_options[5];
@@ -546,18 +555,20 @@ static void render_current_state(void) {
             if (prof == GDEY037T03_PROFILE_CUSTOM) {
                 refresh_options[menu_count++] = int_str;
                 refresh_options[menu_count++] = cnt_str;
+                refresh_options[menu_count++] = fr_str;
             }
             refresh_options[menu_count++] = "[Back]";
 
+            // Shorter waveforms turn pages faster but erase old text less fully
             const char *help_footer = NULL;
             if (prof == GDEY037T03_PROFILE_NORMAL) {
-                help_footer = "Normal: Timing 2, 3 pulses - crisp & fast";
+                help_footer = "Normal: interval 2, 3 pulses - cleanest, slowest";
             } else if (prof == GDEY037T03_PROFILE_FAST) {
-                help_footer = "Fast: Timing 2, 1 pulse - ~30 FPS high-speed";
+                help_footer = "Fast: interval 2, 2 pulses - quicker, more ghosting";
             } else if (prof == GDEY037T03_PROFILE_TURBO) {
-                help_footer = "Turbo: Timing 1, 1 pulse - ~45 FPS ultra-speed";
+                help_footer = "Turbo: interval 1, 1 pulse - quickest, most ghosting";
             } else {
-                help_footer = "Custom: Tune pulse interval & pulse count";
+                help_footer = "Custom: higher frame rate = shorter refresh";
             }
 
             display_draw_menu_ext("Refresh Settings", help_footer, refresh_options, menu_count, selected_refresh_menu_idx);
@@ -810,7 +821,7 @@ int main(void) {
                     selected_transfer_idx = wrap_index(selected_transfer_idx, step, TRANSFER_COUNT);
                     render_current_state();
                 } else if (current_state == STATE_REFRESH_SETTINGS) {
-                    int max_opts = (display_get_refresh_profile() == GDEY037T03_PROFILE_CUSTOM) ? 4 : 2;
+                    int max_opts = (display_get_refresh_profile() == GDEY037T03_PROFILE_CUSTOM) ? 5 : 2;
                     selected_refresh_menu_idx = wrap_index(selected_refresh_menu_idx, step, max_opts);
                     render_current_state();
                 }
@@ -955,6 +966,8 @@ int main(void) {
                         display_cycle_pulse_interval();
                     } else if (prof == GDEY037T03_PROFILE_CUSTOM && selected_refresh_menu_idx == 2) {
                         display_cycle_pulse_count();
+                    } else if (prof == GDEY037T03_PROFILE_CUSTOM && selected_refresh_menu_idx == 3) {
+                        display_cycle_frame_rate();
                     } else {
                         current_state = STATE_SETTINGS;
                     }

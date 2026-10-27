@@ -8,17 +8,20 @@
 extern "C" {
 #endif
 
+// Partial refresh waveforms (register LUT). Duration scales with interval x pulses; the
+// frame rate is the controller default except in CUSTOM. Full refreshes always use OTP.
 enum gdey037t03_refresh_profile {
-    GDEY037T03_PROFILE_NORMAL = 0, // Clean standard OTP/LUT refresh (~300ms)
-    GDEY037T03_PROFILE_FAST   = 1, // Fast partial refresh (~180ms, T=4, count=1)
-    GDEY037T03_PROFILE_TURBO  = 2, // Turbo partial refresh (~110ms, T=2, count=1)
-    GDEY037T03_PROFILE_CUSTOM = 3, // Custom pulse timing interval and pulse count
+    GDEY037T03_PROFILE_NORMAL = 0, // interval 2, 3 pulses
+    GDEY037T03_PROFILE_FAST   = 1, // interval 2, 2 pulses
+    GDEY037T03_PROFILE_TURBO  = 2, // interval 1, 1 pulse
+    GDEY037T03_PROFILE_CUSTOM = 3, // user pulse interval, pulse count and frame rate
 };
 
 struct gdey037t03_refresh_config {
     enum gdey037t03_refresh_profile profile;
     uint8_t pulse_interval; // 1 - 15 (frames per pulse phase)
     uint8_t pulse_count;    // 1 - 5 (number of pulse iterations / repeat count)
+    uint8_t frame_rate;     // CUSTOM only: Hz written to PLL (0x30), 5 - 200; 0 = controller default
 };
 
 /**

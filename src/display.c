@@ -62,21 +62,25 @@ int display_init(void) {
     return 0;
 }
 
-void display_set_refresh_config(enum gdey037t03_refresh_profile profile, uint8_t interval, uint8_t count) {
+void display_set_refresh_config(enum gdey037t03_refresh_profile profile, uint8_t interval, uint8_t count,
+                                uint8_t frame_rate) {
     if (!device_is_ready(epd_dev)) return;
     struct gdey037t03_refresh_config cfg = {
         .profile = profile,
         .pulse_interval = interval,
         .pulse_count = count,
+        .frame_rate = frame_rate,
     };
     gdey037t03_set_refresh_config(epd_dev, &cfg);
 }
 
-void display_get_refresh_config(enum gdey037t03_refresh_profile *profile, uint8_t *interval, uint8_t *count) {
+void display_get_refresh_config(enum gdey037t03_refresh_profile *profile, uint8_t *interval, uint8_t *count,
+                                uint8_t *frame_rate) {
     struct gdey037t03_refresh_config cfg = {
         .profile = GDEY037T03_PROFILE_NORMAL,
         .pulse_interval = 2,
         .pulse_count = 3,
+        .frame_rate = 0,
     };
     if (device_is_ready(epd_dev)) {
         gdey037t03_get_refresh_config(epd_dev, &cfg);
@@ -84,6 +88,7 @@ void display_get_refresh_config(enum gdey037t03_refresh_profile *profile, uint8_
     *profile = cfg.profile;
     *interval = cfg.pulse_interval;
     *count = cfg.pulse_count;
+    *frame_rate = cfg.frame_rate;
 }
 
 void display_power_on(void) {
@@ -219,6 +224,32 @@ void display_cycle_pulse_count(void) {
     uint8_t cur = display_get_pulse_count();
     uint8_t next = (cur >= 4) ? 1 : (cur + 1);
     display_set_pulse_count(next);
+}
+
+uint8_t display_get_frame_rate(void) {
+    struct gdey037t03_refresh_config cfg;
+    if (device_is_ready(epd_dev) && gdey037t03_get_refresh_config(epd_dev, &cfg) == 0 &&
+        cfg.profile == GDEY037T03_PROFILE_CUSTOM) {
+        return cfg.frame_rate;
+    }
+    return 0;
+}
+
+void display_cycle_frame_rate(void) {
+    // 0 = controller default. All are datasheet PLL steps; the higher ones are untested on the panel.
+    static const uint8_t rates[] = {0, 50, 65, 80, 100, 120, 150, 200};
+    const size_t n = sizeof(rates) / sizeof(rates[0]);
+    uint8_t cur = display_get_frame_rate();
+    size_t i = 0;
+    while (i < n && rates[i] <= cur) {
+        i++;
+    }
+    struct gdey037t03_refresh_config cfg;
+    if (device_is_ready(epd_dev)) {
+        gdey037t03_get_refresh_config(epd_dev, &cfg);
+        cfg.frame_rate = (i < n) ? rates[i] : rates[0];
+        gdey037t03_set_refresh_config(epd_dev, &cfg);
+    }
 }
 
 const char *display_get_refresh_profile_name(void) {

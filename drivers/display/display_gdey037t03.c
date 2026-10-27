@@ -45,6 +45,9 @@ struct gdey037t03_config {
 #ifndef CONFIG_GDEY037T03_CUSTOM_PULSE_COUNT
 #define CONFIG_GDEY037T03_CUSTOM_PULSE_COUNT 1
 #endif
+#ifndef CONFIG_GDEY037T03_CUSTOM_FRAME_RATE
+#define CONFIG_GDEY037T03_CUSTOM_FRAME_RATE 0
+#endif
 
 struct gdey037t03_data {
     const struct device *dev;
@@ -53,6 +56,7 @@ struct gdey037t03_data {
     bool powered;      // charge pump on (0x04 issued, no 0x02 since)
     bool vcc_off;      // panel supply cut; controller state and RAM are lost
     int lut_loaded;    // LUT_OTP, LUT_UNKNOWN or the partial waveform signature
+    bool pll_set;      // PLL (0x30) changed from its reset default since the last soft reset
     struct gdey037t03_refresh_config refresh_cfg;
     struct k_mutex lock;
     struct k_sem busy_sem;
@@ -173,6 +177,7 @@ static void epd_init_display(const struct device *dev) {
 
     data->powered = false;
     data->lut_loaded = LUT_OTP;
+    data->pll_set = false;
 }
 
 static void epd_power_on(const struct device *dev) {
@@ -263,6 +268,19 @@ void gdey037t03_request_full_refresh(const struct device *dev) {
     data->force_full_refresh = true;
 }
 
+// UC8253 PLL (0x30) FRS[4:0] per datasheet: 5 Hz steps from 5 Hz (0) to 120 Hz (23),
+// then 10 Hz steps up to 200 Hz (31). Returns the nearest code.
+static uint8_t epd_frs_from_hz(uint8_t hz) {
+    if (hz <= 120) {
+        return (hz < 5) ? 0 : (hz + 2) / 5 - 1;
+    }
+    return MIN(23 + (hz - 120 + 5) / 10, 31);
+}
+
+static uint8_t epd_hz_from_frs(uint8_t frs) {
+    return (frs <= 23) ? (frs + 1) * 5 : 120 + (frs - 23) * 10;
+}
+
 int gdey037t03_set_refresh_config(const struct device *dev, const struct gdey037t03_refresh_config *cfg) {
     if (!dev || !cfg) {
         return -EINVAL;
@@ -273,8 +291,12 @@ int gdey037t03_set_refresh_config(const struct device *dev, const struct gdey037
     if (data->refresh_cfg.pulse_interval > 15) data->refresh_cfg.pulse_interval = 15;
     if (data->refresh_cfg.pulse_count < 1) data->refresh_cfg.pulse_count = 1;
     if (data->refresh_cfg.pulse_count > 5) data->refresh_cfg.pulse_count = 5;
-    LOG_INF("EPD Refresh config: profile=%d, interval=%u, count=%u",
-            data->refresh_cfg.profile, data->refresh_cfg.pulse_interval, data->refresh_cfg.pulse_count);
+    if (data->refresh_cfg.frame_rate != 0) {
+        data->refresh_cfg.frame_rate = epd_hz_from_frs(epd_frs_from_hz(data->refresh_cfg.frame_rate));
+    }
+    LOG_INF("EPD Refresh config: profile=%d, interval=%u, count=%u, frame rate=%u Hz (0=default)",
+            data->refresh_cfg.profile, data->refresh_cfg.pulse_interval, data->refresh_cfg.pulse_count,
+            data->refresh_cfg.frame_rate);
     return 0;
 }
 
@@ -287,7 +309,9 @@ int gdey037t03_get_refresh_config(const struct device *dev, struct gdey037t03_re
     return 0;
 }
 
-static void partial_waveform_params(const struct gdey037t03_data *data, uint8_t *t, uint8_t *rp) {
+// *hz = 0 leaves the PLL at the controller default
+static void partial_waveform_params(const struct gdey037t03_data *data, uint8_t *t, uint8_t *rp, uint8_t *hz) {
+    *hz = 0;
     switch (data->refresh_cfg.profile) {
     case GDEY037T03_PROFILE_FAST:
         *t = 2;
@@ -300,6 +324,7 @@ static void partial_waveform_params(const struct gdey037t03_data *data, uint8_t 
     case GDEY037T03_PROFILE_CUSTOM:
         *t = CLAMP(data->refresh_cfg.pulse_interval, 1, 15);
         *rp = CLAMP(data->refresh_cfg.pulse_count, 1, 5);
+        *hz = data->refresh_cfg.frame_rate;
         break;
     default: // GDEY037T03_PROFILE_NORMAL
         *t = 2;
@@ -416,14 +441,28 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
             epd_init_display(dev);
         }
     } else {
+        uint8_t t, rp, hz;
+        partial_waveform_params(data, &t, &rp, &hz);
+        int signature = (hz << 8) | (t << 4) | rp;
+        if (hz == 0 && data->pll_set) {
+            // Only reachable with KEEP_POWERED: a soft reset is the one way back to the default
+            // frame rate, whose value the datasheet doesn't pin down (06h in one table, 09h in another)
+            epd_power_off(dev);
+            epd_init_display(dev);
+        }
+
         // New frame into RAM 0x13; RAM 0x10 still holds the frame on screen
         epd_write_ram(config, 0x13, buf, desc->buf_size);
 
-        uint8_t t, rp;
-        partial_waveform_params(data, &t, &rp);
-        int signature = (t << 4) | rp;
         if (data->lut_loaded != signature) {
             epd_load_partial_lut(config, t, rp);
+            if (hz != 0) {
+                // The soft reset after every refresh restores the default, so this is
+                // rewritten each time along with the LUT
+                epd_write_cmd(config, 0x30);
+                epd_write_data(config, epd_frs_from_hz(hz));
+                data->pll_set = true;
+            }
             data->lut_loaded = signature;
         }
         t_tx = k_uptime_get_32();
@@ -539,6 +578,7 @@ static const struct display_driver_api gdey037t03_driver_api = {
             .profile = (enum gdey037t03_refresh_profile)CONFIG_GDEY037T03_DEFAULT_REFRESH_PROFILE, \
             .pulse_interval = CONFIG_GDEY037T03_CUSTOM_PULSE_INTERVAL,              \
             .pulse_count = CONFIG_GDEY037T03_CUSTOM_PULSE_COUNT,                    \
+            .frame_rate = CONFIG_GDEY037T03_CUSTOM_FRAME_RATE,                      \
         },                                                                          \
     };                                                                              \
                                                                                     \

@@ -111,8 +111,14 @@ uint8_t display_get_pulse_count(void);
 void display_set_pulse_count(uint8_t count);
 void display_cycle_pulse_count(void);
 
+// Custom profile's PLL frame rate in Hz; 0 = controller default (always 0 for other profiles)
+uint8_t display_get_frame_rate(void);
+void display_cycle_frame_rate(void);
+
 const char *display_get_refresh_profile_name(void);
-void display_set_refresh_config(enum gdey037t03_refresh_profile profile, uint8_t interval, uint8_t count);
-void display_get_refresh_config(enum gdey037t03_refresh_profile *profile, uint8_t *interval, uint8_t *count);
+void display_set_refresh_config(enum gdey037t03_refresh_profile profile, uint8_t interval, uint8_t count,
+                                uint8_t frame_rate);
+void display_get_refresh_config(enum gdey037t03_refresh_profile *profile, uint8_t *interval, uint8_t *count,
+                                uint8_t *frame_rate);
 
 #endif // DISPLAY_H

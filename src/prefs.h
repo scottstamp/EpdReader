@@ -5,8 +5,9 @@
 #include <stdint.h>
 
 // User preferences and stats, kept in internal flash (Zephyr settings on NVS) so they
-// survive reboots and don't depend on the SD card. Bump the key in prefs.c when the
-// layout changes.
+// survive reboots and don't depend on the SD card. New fields go at the end, with explicit
+// padding: a shorter blob from older firmware still loads and the new fields read as 0.
+// Bump the key in prefs.c only when existing fields change.
 typedef struct {
     uint8_t font;
     uint8_t size;
@@ -17,6 +18,9 @@ typedef struct {
     uint8_t pulse_interval;
     uint8_t pulse_count;
     uint32_t reading_seconds;
+    // ---- end of the original 12-byte layout ----
+    uint8_t frame_rate; // Hz, 0 = controller default
+    uint8_t reserved[3];
 } Prefs;
 
 // Returns false when nothing has been stored yet

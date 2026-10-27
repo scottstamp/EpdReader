@@ -14,10 +14,12 @@ config GDEY037T03_DEFAULT_REFRESH_PROFILE
 	range 0 3
 	help
 	  Default refresh profile for the GDEY037T03 display.
-	  0 = Normal (pulse interval 2, 3 pulses, minimal ghosting)
-	  1 = Fast (pulse interval 2, 2 pulses, light ghosting)
-	  2 = Turbo (pulse interval 1, 1 pulse, max FPS)
-	  3 = Custom (user defined pulse interval and pulse count)
+	  0 = Normal (pulse interval 2, 3 pulses)
+	  1 = Fast (pulse interval 2, 2 pulses)
+	  2 = Turbo (pulse interval 1, 1 pulse)
+	  3 = Custom (user defined pulse interval, pulse count and frame rate)
+	  Fewer/shorter pulses give shorter refreshes but erase old text less
+	  completely. All but Custom run at the controller's default frame rate.
 
 config GDEY037T03_CUSTOM_PULSE_INTERVAL
 	int "Custom pulse timing interval (frames/cycles)"
@@ -40,5 +42,17 @@ config GDEY037T03_CUSTOM_PULSE_COUNT
 	range 1 5
 	help
 	  Number of pulse drive repetitions (Repeat count / RP).
+
+config GDEY037T03_CUSTOM_FRAME_RATE
+	int "Custom frame rate in Hz (0 = controller default)"
+	default 0
+	range 0 200
+	help
+	  Frame rate written to the UC8253 PLL register (0x30) before each
+	  partial refresh when the Custom profile is active. The datasheet
+	  lists 5-120 Hz in 5 Hz steps and 130-200 Hz in 10 Hz steps; other
+	  values are rounded to the nearest. The waveform's frame part of
+	  the refresh time scales with 1/frame rate. 0 leaves the register
+	  at its reset default.
 
 endif
