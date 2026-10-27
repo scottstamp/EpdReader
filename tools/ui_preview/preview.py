@@ -11,6 +11,7 @@ Usage:
   python tools/ui_preview/preview.py --cc clang   # pick a different C compiler
   python tools/ui_preview/preview.py --scale 3
   python tools/ui_preview/preview.py --books ../books/*.epub   # also convert + paginate books
+  python tools/ui_preview/preview.py --cover Book.epub.cov     # lock screen with a cover
 
 Reader pages use fonts/Arial.fnt as the SD font (loaded through stdio-backed fs stubs).
 The run fails if a layout self-check fails (measure != draw, or a page break splitting a
@@ -73,6 +74,7 @@ def main():
     parser.add_argument("--out", default=os.path.join(HERE, "out"), help="output directory for PNGs")
     parser.add_argument("--scale", type=int, default=2, help="pixel scale factor")
     parser.add_argument("--books", nargs="*", default=[], help="EPUB files to convert and paginate")
+    parser.add_argument("--cover", help="raw 145x210 8-bit grayscale cover (e.g. a .cov file) for the lock screen")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -91,6 +93,8 @@ def main():
         subprocess.run(cmd, check=True)
         # The stdio fs stubs resolve /SD:/ against the repo, so fonts/Arial.fnt loads as the SD font
         env = dict(os.environ, UI_PREVIEW_SD_ROOT=REPO)
+        if args.cover:
+            env["UI_PREVIEW_COVER"] = os.path.abspath(args.cover)
         # A non-zero exit means a layout self-check failed; still write the PNGs to inspect
         texts = []
         if args.books:

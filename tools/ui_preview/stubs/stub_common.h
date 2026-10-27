@@ -18,6 +18,9 @@
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 #define BIT(n) (1u<<(n))
+#ifndef CLAMP
+#define CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))
+#endif
 #define __aligned(x) __attribute__((aligned(x)))
 static inline uint32_t k_uptime_get_32(void) { return 0; }
 struct device { int dummy; };

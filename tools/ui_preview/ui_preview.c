@@ -26,8 +26,19 @@ int gdey037t03_get_refresh_config(const struct device *dev, struct gdey037t03_re
     (void)dev; cfg->profile = GDEY037T03_PROFILE_NORMAL; cfg->pulse_interval = 2; cfg->pulse_count = 3; cfg->frame_rate = 0; return 0;
 }
 uint8_t battery_get_percentage(void) { return 85; }
-const EpubBook *storage_get_epub(const char *n) { (void)n; return NULL; }
-bool epub_extract_cover_image(const EpubBook *b, uint8_t *g, int w, int h) { (void)b; (void)g; (void)w; (void)h; return false; }
+// The lock screen gets a cover when UI_PREVIEW_COVER names a raw 8-bit grayscale file of the
+// requested size (e.g. a .cov cache file from the SD card)
+static EpubBook preview_book;
+const EpubBook *storage_get_epub(const char *n) { (void)n; return getenv("UI_PREVIEW_COVER") ? &preview_book : NULL; }
+bool epub_extract_cover_image(const EpubBook *b, uint8_t *g, int w, int h) {
+    (void)b;
+    const char *path = getenv("UI_PREVIEW_COVER");
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f) return false;
+    size_t got = fread(g, 1, (size_t)w * h, f);
+    fclose(f);
+    return got == (size_t)w * h;
+}
 
 // Writes the logical 416x240 landscape view (flipped orientation, the default)
 static void dump(const char *path) {
@@ -203,6 +214,10 @@ int main(int argc, char **argv) {
                                     "[Back]" };
     display_draw_menu("Bibliothèque", accented_menu, 4, 1);
     snprintf(path, sizeof(path), "%s/menu_accents.pbm", argv[1]);
+    dump(path);
+
+    display_draw_lockscreen("book.epub", "The Martian", "Andy Weir", "Chapter 7", 42);
+    snprintf(path, sizeof(path), "%s/lockscreen.pbm", argv[1]);
     dump(path);
 
     // Reader pages: the SD font (fonts/Arial.fnt via the stdio fs stubs) and the built-in fonts

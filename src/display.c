@@ -872,47 +872,68 @@ void display_draw_progress(const char *task, int percentage) {
     display_update(false);
 }
 
-void display_draw_atkinson_dithered(int dst_x, int dst_y, int target_w, int target_h, const uint8_t *gray_img, int img_w, int img_h) {
+// Maps the image's own dark/light range (2nd-98th percentile) onto full black-white and
+// darkens midtones, so pale cover art and white titles survive 1-bit dithering
+static void build_tone_curve(const uint8_t *gray_img, int img_w, int img_h, uint8_t lut[256]) {
+    uint32_t hist[256] = {0};
+    uint32_t total = (uint32_t)img_w * img_h;
+    for (uint32_t i = 0; i < total; i++) {
+        hist[gray_img[i]]++;
+    }
+
+    uint32_t clip = total / 50;
+    int lo = 0, hi = 255;
+    uint32_t acc = 0;
+    for (int v = 0; v < 256; v++) {
+        acc += hist[v];
+        if (acc > clip) { lo = v; break; }
+    }
+    acc = 0;
+    for (int v = 255; v >= 0; v--) {
+        acc += hist[v];
+        if (acc > clip) { hi = v; break; }
+    }
+    int span = MAX(hi - lo, 1);
+
+    for (int v = 0; v < 256; v++) {
+        int s = CLAMP((v - lo) * 255 / span, 0, 255);
+        // Halfway between linear and squared: roughly a 1.4 gamma
+        lut[v] = (uint8_t)((s * 255 + s * s) / 510);
+    }
+}
+
+void display_draw_dithered(int dst_x, int dst_y, int target_w, int target_h, const uint8_t *gray_img, int img_w, int img_h) {
     if (!gray_img || img_w <= 0 || img_h <= 0 || target_w <= 0 || target_h <= 0) return;
     if (target_w > 200) target_w = 200;
 
-    static int16_t err_buf[3][200];
+    uint8_t lut[256];
+    build_tone_curve(gray_img, img_w, img_h, lut);
+
+    // Floyd-Steinberg keeps all of the quantization error (Atkinson dropped a quarter of
+    // it, which washed out midtones); error kept in 1/16 units over two rows
+    static int16_t err_buf[2][200];
     memset(err_buf, 0, sizeof(err_buf));
 
     for (int y = 0; y < target_h; y++) {
-        int r0 = y % 3;
-        int r1 = (y + 1) % 3;
-        int r2 = (y + 2) % 3;
-
-        memset(err_buf[r2], 0, target_w * sizeof(int16_t));
+        int16_t *cur = err_buf[y & 1];
+        int16_t *next = err_buf[(y + 1) & 1];
+        memset(next, 0, target_w * sizeof(int16_t));
         int src_y = (y * img_h) / target_h;
 
         for (int x = 0; x < target_w; x++) {
             int src_x = (x * img_w) / target_w;
-            int16_t old_val = (int16_t)gray_img[src_y * img_w + src_x] + err_buf[r0][x];
+            int val = lut[gray_img[src_y * img_w + src_x]] + cur[x] / 16;
+            val = CLAMP(val, 0, 255);
 
-            if (old_val < 0) old_val = 0;
-            if (old_val > 255) old_val = 255;
+            int out = (val >= 128) ? 255 : 0;
+            int err = val - out;
 
-            uint8_t new_val = (old_val >= 128) ? 255 : 0;
-            int16_t err = (old_val - new_val) / 8;
+            display_draw_pixel(dst_x + x, dst_y + y, out ? 1 : 0);
 
-            display_draw_pixel(dst_x + x, dst_y + y, (new_val == 0) ? 0 : 1);
-
-            if (x + 1 < target_w) {
-                err_buf[r0][x + 1] += err;
-            }
-            if (x + 2 < target_w) {
-                err_buf[r0][x + 2] += err;
-            }
-            if (x - 1 >= 0) {
-                err_buf[r1][x - 1] += err;
-            }
-            err_buf[r1][x] += err;
-            if (x + 1 < target_w) {
-                err_buf[r1][x + 1] += err;
-            }
-            err_buf[r2][x] += err;
+            if (x + 1 < target_w) cur[x + 1] += err * 7;
+            if (x > 0) next[x - 1] += err * 3;
+            next[x] += err * 5;
+            if (x + 1 < target_w) next[x + 1] += err;
         }
     }
 }
@@ -952,7 +973,7 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
                 }
             }
         } else {
-            display_draw_atkinson_dithered(cover_x, cover_y, cover_w, cover_h, cover_gray_buf, cover_w, cover_h);
+            display_draw_dithered(cover_x, cover_y, cover_w, cover_h, cover_gray_buf, cover_w, cover_h);
         }
         display_draw_rect(cover_x, cover_y, cover_w, cover_h, 0);
 
