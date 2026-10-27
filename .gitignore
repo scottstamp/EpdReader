@@ -13,3 +13,6 @@ books/
 
 # UI preview renders
 tools/ui_preview/out/
+
+# Agent worktrees
+.claude/worktrees/
