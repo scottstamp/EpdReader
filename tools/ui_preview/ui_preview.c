@@ -2,10 +2,12 @@
 // PBM into the directory given as argv[1]. Run through preview.py, which builds this and
 // converts the dumps to PNG. Hardware-facing calls are stubbed below.
 #include <stdio.h>
+#include <stdlib.h>
 #include "display.h"
 #include "storage.h"
 #include "battery.h"
 #include "epub.h"
+#include "font_extended.h"
 
 const struct device stub_epd_device;
 static const uint8_t *last_fb;
@@ -43,6 +45,137 @@ static void dump(const char *path) {
     fclose(f);
 }
 
+// Accented sample text with the reader's inline style codes, a soft hyphen, a ligature
+// and a word too long for one line
+static const char reader_sample[] =
+    "\x02" "Chapitre premier" "\x03" "\n\n"
+    "« Ça va ? » demanda Zoë en entrant dans le café. “I’d rather not,” she said — and then, "
+    "after a pause… ‘Fine.’ The 1914–1918 war; pages 3–7.\n\n"
+    "Crème brûlée costs 5 € (or £4); naïve façade, señor Muñoz, Ångström, Øresund, smörgåsbord, "
+    "Łódź, Dvořák, œuvre, Straße, Æsir.\n\n"
+    "\x0E" "Italic: élève, déjà vu, piñata — “quoted” text." "\x0F" " "
+    "\x15" "Underlined: résumé." "\x16" " " "\x02" "Bold: Ñandú über alles" "\x03" ".\n\n"
+    "Soft hy\xC2\xAD" "phen, \xEF\xAC\x81" "ne ligature, zero\xE2\x80\x8Bwidth. "
+    "PneumonoultramicroscopicsilicovolcanoconiosisàèìòùáéíóúâêîôûäëïöüçñÀÈÌÒÙÁÉÍÓÚ then more text to wrap.\n\n"
+    "\x0E" "Une phrase en italique qui continue sur la page suivante, avec des accents : "
+    "à, â, ç, é, è, ê, ë, î, ï, ô, ù, û, ü, ÿ, œ. "
+    "Encore une phrase longue pour remplir la page et vérifier la pagination — “guillemets” … "
+    "Encore une phrase longue pour remplir la page et vérifier la pagination — “guillemets” … "
+    "Encore une phrase longue pour remplir la page et vérifier la pagination — “guillemets” … "
+    "Encore une phrase longue pour remplir la page et vérifier la pagination — “guillemets” …" "\x0F" "\n\n"
+    "Último párrafo: ¿Qué tal? ¡Muy bien! Grüße aus Köln. Señora Peña’s niño.\n";
+
+static uint8_t scan_styles(const char *s, uint32_t len, uint8_t style) {
+    for (uint32_t i = 0; i < len; i++) {
+        switch (s[i]) {
+        case '\x0E': style |= READER_STYLE_ITALIC; break;
+        case '\x0F': style &= ~READER_STYLE_ITALIC; break;
+        case '\x02': style |= READER_STYLE_BOLD; break;
+        case '\x03': style &= ~READER_STYLE_BOLD; break;
+        case '\x15': style |= READER_STYLE_UNDERLINE; break;
+        case '\x16': style &= ~READER_STYLE_UNDERLINE; break;
+        default: break;
+        }
+    }
+    return style;
+}
+
+static bool is_cont(char c) { return ((uint8_t)c & 0xC0) == 0x80; }
+
+// Pages through the sample with the current reader font, checking that measuring and drawing
+// agree and that page breaks never split a UTF-8 sequence. Returns the number of failures.
+static int render_reader_pages(const char *dir, const char *font_name) {
+    int failures = 0;
+    const uint32_t len = sizeof(reader_sample) - 1;
+    uint32_t offset = 0;
+    uint8_t style = 0;
+    char path[512];
+
+    for (int page = 0; offset < len && page < 20; page++) {
+        const char *text = reader_sample + offset;
+        uint32_t measured = display_measure_reader_page(text);
+        uint32_t drawn = display_draw_reader_page("Les Misérables — Tome I", text, offset * 100 / len, style);
+        if (measured != drawn) {
+            printf("FAIL %s page %d: measured %u != drawn %u\n", font_name, page, measured, drawn);
+            failures++;
+        }
+        if (drawn == 0 || (offset + drawn < len && is_cont(reader_sample[offset + drawn]))) {
+            printf("FAIL %s page %d: bad page break at %u\n", font_name, page, offset + drawn);
+            failures++;
+            break;
+        }
+        if (page < 2) {
+            snprintf(path, sizeof(path), "%s/reader_%s_%d.pbm", dir, font_name, page + 1);
+            dump(path);
+        }
+        style = scan_styles(text, drawn, style);
+        offset += drawn;
+    }
+
+    // Truncated page buffers (as storage reads them) must not end a page mid-character
+    static char buf[sizeof(reader_sample)];
+    for (uint32_t cut = 1; cut <= len; cut++) {
+        memcpy(buf, reader_sample, cut);
+        buf[cut] = '\0';
+        uint32_t c = display_measure_reader_page(buf);
+        if (c > cut || (c < len && is_cont(reader_sample[c]))) {
+            printf("FAIL %s: buffer of %u bytes measured to %u\n", font_name, cut, c);
+            failures++;
+            break;
+        }
+    }
+    return failures;
+}
+
+// Pages through a whole converted book with 1 KB windows like main.c reads them, checking the
+// same invariants, and dumps the page at 1/3 of the book. Returns the number of failures.
+#define BOOK_PAGE_BUF_SIZE 1024
+static int paginate_book(const char *dir, const char *txt_path, int book_idx, const char *font_name) {
+    FILE *f = fopen(txt_path, "rb");
+    if (!f) {
+        printf("FAIL: cannot open %s\n", txt_path);
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    uint32_t len = (uint32_t)ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *book = malloc(len + 1);
+    len = (uint32_t)fread(book, 1, len, f);
+    book[len] = '\0';
+    fclose(f);
+
+    int failures = 0, pages = 0;
+    bool dumped = false;
+    uint32_t offset = 0;
+    uint8_t style = 0;
+    char buf[BOOK_PAGE_BUF_SIZE];
+    while (offset < len) {
+        uint32_t got = MIN(len - offset, BOOK_PAGE_BUF_SIZE - 1);
+        memcpy(buf, book + offset, got);
+        buf[got] = '\0';
+        uint32_t measured = display_measure_reader_page(buf);
+        uint32_t drawn = display_draw_reader_page("Book", buf, offset * 100 / len, style);
+        if (measured != drawn || drawn == 0 || drawn > got ||
+            (offset + drawn < len && is_cont(book[offset + drawn]))) {
+            printf("FAIL %s %s at %u: measured %u drawn %u\n", font_name, txt_path, offset, measured, drawn);
+            failures++;
+            break;
+        }
+        if (!dumped && offset >= len / 3) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/book%d_%s.pbm", dir, book_idx, font_name);
+            dump(path);
+            dumped = true;
+        }
+        style = scan_styles(buf, drawn, style);
+        offset += drawn;
+        pages++;
+    }
+    printf("%s %s: %d pages\n", font_name, txt_path, pages);
+    free(book);
+    return failures;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     const CarouselItem items[] = {
@@ -64,6 +197,36 @@ int main(int argc, char **argv) {
     display_draw_menu("Settings", settings, 8, 0);
     snprintf(path, sizeof(path), "%s/settings.pbm", argv[1]);
     dump(path);
-    printf("rendered %d frames\n", fb_count);
-    return 0;
+
+    // Menus and headers use the built-in fonts: accents fall back to ASCII
+    const char *accented_menu[] = { "Les Misérables — Victor Hugo", "Cien años de soledad", "Über “Quotes” … 5 €",
+                                    "[Back]" };
+    display_draw_menu("Bibliothèque", accented_menu, 4, 1);
+    snprintf(path, sizeof(path), "%s/menu_accents.pbm", argv[1]);
+    dump(path);
+
+    // Reader pages: the SD font (fonts/Arial.fnt via the stdio fs stubs) and the built-in fonts
+    int failures = 0;
+    if (!font_sd_load("/SD:/fonts/Arial.fnt")) {
+        printf("FAIL: could not load fonts/Arial.fnt (set UI_PREVIEW_SD_ROOT to the repo root)\n");
+        failures++;
+    }
+    static const struct { FontType font; FontSize size; const char *name; } reader_fonts[] = {
+        { FONT_SD, SIZE_MEDIUM, "sd" },
+        { FONT_SERIF, SIZE_MEDIUM, "serif" },
+        { FONT_SANS, SIZE_SMALL, "sans_small" },
+    };
+    for (size_t f = 0; f < sizeof(reader_fonts) / sizeof(reader_fonts[0]); f++) {
+        display_set_font(reader_fonts[f].font);
+        display_set_size(reader_fonts[f].size);
+        failures += render_reader_pages(argv[1], reader_fonts[f].name);
+        for (int b = 2; b < argc; b++) {
+            failures += paginate_book(argv[1], argv[b], b - 1, reader_fonts[f].name);
+        }
+    }
+    display_set_font(FONT_SERIF);
+    display_set_size(SIZE_MEDIUM);
+
+    printf("rendered %d frames, %d check failures\n", fb_count, failures);
+    return failures ? 1 : 0;
 }
