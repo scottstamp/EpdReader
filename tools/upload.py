@@ -404,10 +404,10 @@ async def ble_send_book(write, events: asyncio.Queue, name: str, data: bytes,
         while sent >= size and acked < size:
             await wait_for_ack()
 
-    if rewinds:
-        print(f"\n  (recovered from {rewinds} lost packet(s))")
     if progress:
         progress(size, size)
+    if rewinds:
+        print(f"\n  (recovered from {rewinds} lost packet(s))", end="")
     await write(bytes([BLE_OP_END]), True)
     ev = await next_event()
     if ble_check_event(ev) != BLE_EVT_DONE:
