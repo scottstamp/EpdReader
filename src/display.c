@@ -906,7 +906,11 @@ static void draw_menu(const char *title, const char *sub_footer, const char *opt
             }
             text_x = bx + box + 7;
         }
-        display_draw_gfx_string(text_x, y, options[i], &AmazonEmber_Medium12pt7b, ink);
+        int text_w = display_draw_gfx_string(text_x, y, options[i], &AmazonEmber_Medium12pt7b, ink);
+        if (checks && checks[i] > 0) {
+            // Struck through at x-height middle, 2 px so it survives e-paper ghosting
+            display_fill_rect(text_x - 1, y - 6, text_w + 2, 2, ink);
+        }
     }
 
     if (sub_footer && sub_footer[0]) {
