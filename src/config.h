@@ -15,7 +15,11 @@
 #define EPD_HEIGHT 240
 
 // --- System Settings ---
-#define MAX_BOOKS 10
+#define MAX_BOOKS 64
+// Library filenames and labels are packed into one pool; listing stops early if it fills
+#define BOOK_POOL_SIZE 2240
+// Per-book reading positions kept in PROGRESS_FILE (least recently opened dropped first)
+#define MAX_PROGRESS_ENTRIES 64
 #define MAX_CHAPTERS 100
 #define HISTORY_SIZE 64
 #define AUTO_SLEEP_MS 300000 // 5 minutes inactivity timeout

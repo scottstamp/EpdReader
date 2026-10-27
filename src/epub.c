@@ -345,6 +345,29 @@ static bool load_sidecar_cache(const char *cache_path, EpubBook *book)
     return true;
 }
 
+bool epub_read_cached_metadata(const char *epub_path, char *title, size_t title_max,
+                               char *author, size_t author_max, uint32_t *total_len)
+{
+    char cache_path[256];
+    build_sidecar_path(epub_path, "idx", cache_path, sizeof(cache_path));
+
+    struct fs_file_t f;
+    fs_file_t_init(&f);
+    if (fs_open(&f, cache_path, FS_O_READ) != 0) return false;
+
+    EpubCacheHeader hdr;
+    ssize_t rb = fs_read(&f, &hdr, sizeof(hdr));
+    fs_close(&f);
+    if (rb != sizeof(hdr) || hdr.magic != EPUB_CACHE_MAGIC || hdr.version != EPUB_CACHE_VERSION) {
+        return false;
+    }
+
+    if (title && title_max > 0) snprintf(title, title_max, "%.*s", (int)sizeof(hdr.title), hdr.title);
+    if (author && author_max > 0) snprintf(author, author_max, "%.*s", (int)sizeof(hdr.author), hdr.author);
+    if (total_len) *total_len = hdr.total_book_text_len;
+    return true;
+}
+
 static void save_sidecar_cache(const char *cache_path, const EpubBook *book)
 {
     struct fs_dirent cache_dir_stat;

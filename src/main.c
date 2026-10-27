@@ -35,9 +35,8 @@ typedef enum {
 
 static SystemState current_state = STATE_MENU;
 static uint32_t last_activity_time = 0;
-static char book_list[MAX_BOOKS][64];
-static int book_count = 0;
-static int selected_book_idx = 0;
+static BookList book_list;
+static int selected_book_idx = 0; // book_list.count selects "[Back]"
 static char active_book[64] = "";
 static uint32_t current_page_offset = 0;
 static uint32_t last_page_bytes_read = 300;
@@ -373,6 +372,32 @@ static uint32_t book_progress_percent(void) {
     return MIN(pct, 100);
 }
 
+static void load_library(void) {
+    storage_list_sd_books(&book_list);
+    selected_book_idx = 0;
+    for (int i = 0; i < book_list.count; i++) {
+        if (strcmp(book_list_name(&book_list, i), active_book) == 0) {
+            selected_book_idx = i;
+            break;
+        }
+    }
+}
+
+static void open_book(const char *book_name) {
+    flush_progress(); // the previous book's pending position
+    snprintf(active_book, sizeof(active_book), "%s", book_name);
+    current_page_offset = 0;
+    uint32_t saved_offset;
+    if (storage_read_book_progress(active_book, &saved_offset) &&
+        saved_offset < storage_get_book_size(active_book)) {
+        current_page_offset = saved_offset;
+    }
+    page_history_clear();
+    // Moves the book to the top of the progress file, making it the one to continue
+    storage_write_progress(active_book, current_page_offset);
+    progress_dirty = false;
+}
+
 static void render_home(void) {
     char continue_detail[80] = "No book opened yet";
     if (active_book[0] != '\0') {
@@ -433,13 +458,11 @@ static void render_current_state(void) {
             break;
 
         case STATE_BOOK_LIST: {
-            const char *ptrs[MAX_BOOKS];
-            for (int i = 0; i < book_count; i++) ptrs[i] = book_list[i];
-            if (book_count == 0) {
-                display_draw_message("Book List", "No books found on SD!\nAdd .txt/.epub to /SD/BOOKS", false);
-            } else {
-                display_draw_menu("Select Book", ptrs, book_count, selected_book_idx);
-            }
+            const char *ptrs[MAX_BOOKS + 1];
+            for (int i = 0; i < book_list.count; i++) ptrs[i] = book_list_label(&book_list, i);
+            ptrs[book_list.count] = "[Back]";
+            const char *footer = (book_list.count == 0) ? "No books found. Add .txt/.epub files to /BOOKS" : NULL;
+            display_draw_menu_ext("Library", footer, ptrs, book_list.count + 1, selected_book_idx);
             break;
         }
 
@@ -727,8 +750,7 @@ int main(void) {
         if (restored_book[0] != '\0') {
             snprintf(active_book, sizeof(active_book), "%s", restored_book);
             uint32_t saved_offset = 0;
-            char temp_b[64];
-            if (storage_read_progress(temp_b, &saved_offset)) {
+            if (storage_read_book_progress(active_book, &saved_offset)) {
                 current_page_offset = saved_offset;
             }
         }
@@ -736,7 +758,7 @@ int main(void) {
             current_state = STATE_READER;
         } else if (restored_state == (int)STATE_BOOK_LIST) {
             current_state = STATE_BOOK_LIST;
-            book_count = storage_list_sd_books(book_list, MAX_BOOKS);
+            load_library();
         } else {
             current_state = STATE_MENU;
             selected_menu_idx = (restored_idx >= 0 && restored_idx < HOME_COUNT) ? restored_idx : 0;
@@ -782,8 +804,8 @@ int main(void) {
                     selected_menu_idx = wrap_index(selected_menu_idx, step, HOME_COUNT);
                     render_current_state();
                 } else if (current_state == STATE_BOOK_LIST) {
-                    if (book_count > 0) {
-                        selected_book_idx = wrap_index(selected_book_idx, step, book_count);
+                    if (book_list.count > 0) {
+                        selected_book_idx = wrap_index(selected_book_idx, step, book_list.count + 1);
                         render_current_state();
                     }
                 } else if (current_state == STATE_READER) {
@@ -829,8 +851,7 @@ int main(void) {
                             }
                             break;
                         case HOME_LIBRARY:
-                            book_count = storage_list_sd_books(book_list, MAX_BOOKS);
-                            selected_book_idx = 0;
+                            load_library();
                             current_state = STATE_BOOK_LIST;
                             break;
                         case HOME_SETTINGS:
@@ -854,15 +875,13 @@ int main(void) {
                     }
                     render_current_state();
                 } else if (current_state == STATE_BOOK_LIST) {
-                    if (book_count > 0) {
-                        snprintf(active_book, sizeof(active_book), "%s", book_list[selected_book_idx]);
-                        current_page_offset = 0;
-                        page_history_clear();
-                        storage_write_progress(active_book, current_page_offset);
-                        progress_dirty = false;
+                    if (selected_book_idx < book_list.count) {
+                        open_book(book_list_name(&book_list, selected_book_idx));
                         current_state = STATE_READER;
-                        render_current_state();
+                    } else {
+                        current_state = STATE_MENU;
                     }
+                    render_current_state();
                 } else if (current_state == STATE_READER) {
                     selected_reader_menu_idx = 0;
                     current_state = STATE_READER_MENU;
