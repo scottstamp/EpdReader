@@ -3,10 +3,11 @@
 upload.py  –  nRF EPD Reader: CDC Binary File Transfer Tool
 ------------------------------------------------------------
 Transfers EPUB/TXT books to the device over USB CDC-ACM without using
-the slow USB Mass Storage (MSC/SCSI) stack.
+the slow USB Mass Storage (MSC/SCSI) stack, or over Bluetooth LE.
 
 Requirements:
-    pip install pyserial
+    pip install pyserial        (USB CDC mode)
+    pip install bleak           (Bluetooth mode, --ble)
 
 Usage:
     python upload.py --file mybook.epub          # upload a file
@@ -16,20 +17,30 @@ Usage:
     python upload.py --port COM5 --file book.epub # specify port manually
 
 The device must be in "CDC Transfer Mode" (select from main menu).
+
+Bluetooth:
+    python upload.py --ble --file mybook.epub     # find "nRF EPD Reader" and upload
+    python upload.py --ble --address AA:BB:CC:DD:EE:FF --file mybook.epub
+    python upload.py --ble --file "Long name.epub" --remote-name short.epub
+
+On the reader, open Transfer > Bluetooth upload first.
 """
 
+from __future__ import annotations
+
 import argparse
+import asyncio
 import os
 import struct
 import sys
 import time
+import zlib
 
 try:
     import serial
     import serial.tools.list_ports
 except ImportError:
-    print("ERROR: pyserial not found.  Run:  pip install pyserial")
-    sys.exit(1)
+    serial = None   # only needed for USB CDC mode; reported in main()
 
 # ── Protocol constants ───────────────────────────────────────────────────────
 STX             = 0x02
@@ -250,6 +261,205 @@ def cmd_status(port: serial.Serial):
         print("ERROR: Could not get device status")
 
 
+# ── Bluetooth LE upload (Nordic UART Service) ────────────────────────────────
+# Protocol: see src/upload_proto.h in the firmware.
+NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+NUS_RX_UUID      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # we write frames here
+NUS_TX_UUID      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # device notifies here
+BLE_DEVICE_NAME  = "nRF EPD Reader"
+
+BLE_PROTO_VERSION = 1
+BLE_OP_START, BLE_OP_DATA, BLE_OP_END, BLE_OP_ABORT = 0x01, 0x02, 0x03, 0x04
+BLE_EVT_READY, BLE_EVT_ACK, BLE_EVT_DONE, BLE_EVT_ERROR = 0x81, 0x82, 0x83, 0x84
+BLE_ATT_OVERHEAD  = 3       # ATT write header
+BLE_DATA_HDR      = 5       # DATA opcode + offset
+BLE_NAME_MAX      = 63      # characters, printable ASCII
+
+BLE_ERRORS = {
+    1: "protocol error",
+    2: "invalid file name",
+    3: "device busy",
+    4: "no transfer open",
+    5: "data out of order",
+    6: "receive buffer overrun",
+    7: "size mismatch",
+    8: "checksum mismatch",
+    9: "SD card write failed (card full or missing?)",
+    10: "transfer cancelled on the device",
+}
+
+
+class BleUploadError(Exception):
+    pass
+
+
+def ble_name_valid(name: str) -> bool:
+    """Same rules as the firmware: a bare ASCII .epub/.txt name FAT stores as-is."""
+    if not 0 < len(name) <= BLE_NAME_MAX:
+        return False
+    if name[0] in ". " or name[-1] in ". " or ".." in name:
+        return False
+    if any(not 0x20 <= ord(c) < 0x7F or c in '/\\:*?"<>|' for c in name):
+        return False
+    lower = name.lower()
+    return any(lower.endswith(ext) and len(lower) > len(ext) for ext in (".epub", ".txt"))
+
+
+def ble_frame_start(name: str, size: int, crc: int) -> bytes:
+    return struct.pack("<BBII", BLE_OP_START, BLE_PROTO_VERSION, size, crc) + name.encode("utf-8")
+
+
+def ble_frame_data(offset: int, payload: bytes) -> bytes:
+    return struct.pack("<BI", BLE_OP_DATA, offset) + payload
+
+
+def ble_check_event(ev: bytes) -> int:
+    """Returns the event code; raises BleUploadError for ERROR or a malformed event."""
+    if not ev:
+        raise BleUploadError("empty notification from device")
+    if ev[0] == BLE_EVT_ERROR and len(ev) >= 6:
+        code, offset = struct.unpack_from("<BI", ev, 1)
+        raise BleUploadError(f"device reported: {BLE_ERRORS.get(code, f'error {code}')} (at byte {offset})")
+    sizes = {BLE_EVT_READY: 8, BLE_EVT_ACK: 5, BLE_EVT_DONE: 9}
+    if ev[0] not in sizes or len(ev) < sizes[ev[0]]:
+        raise BleUploadError(f"unexpected notification: {ev.hex()}")
+    return ev[0]
+
+
+async def ble_send_book(write, events: asyncio.Queue, name: str, data: bytes,
+                        max_payload: int, progress=None, timeout: float = 10.0) -> None:
+    """Runs one upload.  write(frame, response) sends a frame to NUS RX, events
+    receives the NUS TX notifications.  Raises BleUploadError on failure."""
+    size = len(data)
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+
+    async def next_event() -> bytes:
+        try:
+            return await asyncio.wait_for(events.get(), timeout)
+        except asyncio.TimeoutError:
+            raise BleUploadError("device stopped responding") from None
+
+    await write(ble_frame_start(name, size, crc), True)
+    ev = await next_event()
+    if ble_check_event(ev) != BLE_EVT_READY:
+        raise BleUploadError(f"expected READY, got {ev.hex()}")
+    _, version, window, dev_max = struct.unpack_from("<BBIH", ev)
+    if version != BLE_PROTO_VERSION:
+        raise BleUploadError(f"device speaks protocol v{version}, this tool v{BLE_PROTO_VERSION}")
+    chunk = max(1, min(max_payload, dev_max))
+
+    acked = 0
+
+    def handle(ev: bytes) -> None:
+        nonlocal acked
+        if ble_check_event(ev) != BLE_EVT_ACK:
+            raise BleUploadError(f"unexpected notification: {ev.hex()}")
+        acked = max(acked, struct.unpack_from("<I", ev, 1)[0])
+
+    sent = 0
+    while sent < size:
+        n = min(chunk, size - sent)
+        # Never more than `window` unacknowledged bytes: the device buffers exactly that much
+        while sent + n - acked > window:
+            handle(await next_event())
+        while not events.empty():
+            handle(events.get_nowait())
+        await write(ble_frame_data(sent, data[sent:sent + n]), False)
+        sent += n
+        if progress:
+            progress(acked, size)
+
+    # END waits for the final ACK so it cannot overtake data still in flight
+    while acked < size:
+        handle(await next_event())
+    if progress:
+        progress(size, size)
+    await write(bytes([BLE_OP_END]), True)
+    ev = await next_event()
+    if ble_check_event(ev) != BLE_EVT_DONE:
+        raise BleUploadError(f"expected DONE, got {ev.hex()}")
+    done_size, done_crc = struct.unpack_from("<II", ev, 1)
+    if done_size != size or done_crc != crc:
+        raise BleUploadError("device confirmed a different size/checksum")
+
+
+async def ble_upload(filepath: str, remote_name: str | None, address: str | None,
+                     device_name: str, timeout: float) -> bool:
+    try:
+        from bleak import BleakClient, BleakScanner
+    except ImportError:
+        print("ERROR: bleak not found.  Run:  pip install bleak")
+        return False
+
+    name = remote_name or os.path.basename(filepath)
+    if not ble_name_valid(name):
+        print(f"ERROR: '{name}' cannot be stored on the reader.  The name must end in .epub or .txt,")
+        print(f"       be plain ASCII of at most {BLE_NAME_MAX} characters, and not contain")
+        print("       / \\ : * ? \" < > | or '..'.")
+        print("       Use --remote-name to choose another name.")
+        return False
+    with open(filepath, "rb") as f:
+        data = f.read()
+
+    print(f"  File : {name}")
+    print(f"  Size : {len(data) / 1024:.1f} KB")
+    if address:
+        print(f"  Looking for {address} ...")
+        device = await BleakScanner.find_device_by_address(address, timeout=timeout)
+    else:
+        print(f"  Scanning for '{device_name}' ...")
+        device = await BleakScanner.find_device_by_filter(
+            lambda d, adv: (adv.local_name or d.name) == device_name, timeout=timeout)
+    if device is None:
+        print("ERROR: Reader not found.  On the reader open Transfer > Bluetooth upload,")
+        print("       then run this again (or pass --address).")
+        return False
+
+    async with BleakClient(device, timeout=timeout) as client:
+        backend = getattr(client, "_backend", None)
+        if hasattr(backend, "_acquire_mtu"):   # BlueZ reports 23 until asked
+            try:
+                await backend._acquire_mtu()
+            except Exception:
+                pass
+        max_payload = max(1, client.mtu_size - BLE_ATT_OVERHEAD - BLE_DATA_HDR)
+        print(f"  Connected: {device.address}  (MTU {client.mtu_size})")
+        print()
+
+        events: asyncio.Queue = asyncio.Queue()
+        await client.start_notify(NUS_TX_UUID, lambda _char, payload: events.put_nowait(bytes(payload)))
+
+        async def write(frame: bytes, response: bool) -> None:
+            await client.write_gatt_char(NUS_RX_UUID, frame, response=response)
+
+        async def abort() -> None:
+            try:
+                await write(bytes([BLE_OP_ABORT]), True)
+            except Exception:
+                pass
+
+        t0 = time.monotonic()
+
+        def progress(done: int, total: int) -> None:
+            elapsed = time.monotonic() - t0
+            _progress(done, max(total, 1), (done / elapsed / 1024) if elapsed > 0 else 0)
+
+        try:
+            await ble_send_book(write, events, name, data, max_payload, progress, timeout)
+        except BleUploadError as e:
+            print(f"\nERROR: {e}")
+            await abort()
+            return False
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            await abort()
+            raise
+
+    elapsed = time.monotonic() - t0
+    speed = (len(data) / elapsed / 1024) if elapsed > 0 else 0
+    print(f"\n\n✓ Transfer complete: {elapsed:.1f}s  average {speed:.1f} KB/s")
+    return True
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
@@ -262,16 +472,51 @@ Examples:
   python upload.py --list
   python upload.py --delete mybook.epub
   python upload.py --status
+  python upload.py --ble --file mybook.epub
         """,
     )
     parser.add_argument("--port", "-p", metavar="PORT",
                         help="Serial port  (auto-detected if omitted)")
+    parser.add_argument("--ble", "-b", action="store_true",
+                        help="Upload over Bluetooth LE instead of USB  (needs bleak; --file only)")
+    parser.add_argument("--address", metavar="ADDR",
+                        help="Bluetooth address of the reader  (scans by name if omitted)")
+    parser.add_argument("--ble-name", metavar="NAME", default=BLE_DEVICE_NAME,
+                        help=f"Bluetooth name to scan for  (default: {BLE_DEVICE_NAME})")
+    parser.add_argument("--remote-name", metavar="NAME",
+                        help="File name to store on the reader  (default: the local file name)")
+    parser.add_argument("--timeout", type=float, default=10.0,
+                        help="Bluetooth scan/response timeout in seconds  (default: 10)")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--file",   "-f", metavar="FILE",     help="Upload EPUB/TXT file")
     group.add_argument("--list",   "-l", action="store_true", help="List books on device")
     group.add_argument("--delete", "-d", metavar="FILENAME",  help="Delete a book by filename")
     group.add_argument("--status", "-s", action="store_true", help="Show device storage status")
     args = parser.parse_args()
+
+    if args.ble:
+        if not args.file:
+            print("ERROR: Bluetooth mode only supports --file")
+            sys.exit(1)
+        if not os.path.isfile(args.file):
+            print(f"ERROR: File not found: {args.file}")
+            sys.exit(1)
+        print("nRF EPD Reader – Bluetooth Transfer")
+        print("─" * 48)
+        try:
+            ok = asyncio.run(ble_upload(args.file, args.remote_name, args.address,
+                                        args.ble_name, args.timeout))
+        except KeyboardInterrupt:
+            print("\nAborted.")
+            ok = False
+        except Exception as e:      # bleak raises backend-specific errors
+            print(f"\nBluetooth error: {e}")
+            ok = False
+        sys.exit(0 if ok else 1)
+
+    if serial is None:
+        print("ERROR: pyserial not found.  Run:  pip install pyserial")
+        sys.exit(1)
 
     # Resolve port
     try:

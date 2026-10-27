@@ -9,7 +9,7 @@
 #include "display.h"
 #include "storage.h"
 #include "buttons.h"
-#include "ble.h"
+#include "ble_upload.h"
 #include "battery.h"
 #include "epub.h"
 #include "prefs.h"
@@ -363,6 +363,69 @@ static void reboot_to_bootloader(void) {
     sys_reboot(SYS_REBOOT_WARM);
 }
 
+// Bluetooth upload: the upload worker owns the SD card from ble_upload_enter() until
+// ble_upload_exit() returns, so every way out of STATE_BLE_UPLOAD goes through it.
+static bool ble_upload_active = false;
+static uint32_t ble_seq_on_entry = 0;  // only results from this visit are shown
+static uint32_t ble_ui_key = 0;        // what the screen shows; redraw when it changes
+#define BLE_UPLOAD_POLL_MS 500
+
+static void ble_upload_enter(void) {
+    flush_progress();
+    BleUploadStatus st;
+    ble_upload_get_status(&st);
+    ble_seq_on_entry = st.result_seq;
+    // The reader's scan buffer is idle on this screen; lending it as the receive
+    // window saves a dedicated 3 KB buffer. ble_upload_exit() takes it back.
+    ble_upload_active = (ble_upload_start((uint8_t *)scan_buf, sizeof(scan_buf)) == 0);
+}
+
+static void ble_upload_exit(void) {
+    if (ble_upload_active) {
+        ble_upload_stop();
+        ble_upload_active = false;
+    }
+}
+
+static int ble_upload_percent(const BleUploadStatus *st) {
+    return st->size ? (int)(((uint64_t)st->received * 100) / st->size) : 0;
+}
+
+// Screen content in one number: e-paper redraws are slow, so progress moves in 10% steps
+static uint32_t ble_upload_ui_key(const BleUploadStatus *st) {
+    if (!ble_upload_active) return 1;
+    uint32_t conn = st->connected ? 1 : 0;
+    if (st->receiving) return 0x100 | (uint32_t)(ble_upload_percent(st) / 10);
+    if (st->result_seq != ble_seq_on_entry) return 0x200 | conn | ((st->result_seq & 0xFFFF) << 16);
+    return 0x300 | conn;
+}
+
+static void render_ble_upload(void) {
+    BleUploadStatus st;
+    ble_upload_get_status(&st);
+    ble_ui_key = ble_upload_ui_key(&st);
+
+    char title[96];
+    if (!ble_upload_active) {
+        display_draw_message("Bluetooth Upload", "Bluetooth unavailable", true);
+    } else if (st.receiving) {
+        int pct = ble_upload_percent(&st);
+        snprintf(title, sizeof(title), "Receiving %.40s  %d%%", st.name, pct);
+        display_draw_progress(title, pct);
+    } else if (st.result_seq != ble_seq_on_entry) {
+        if (st.result_ok) {
+            display_draw_message(st.connected ? "Saved. Send another or press Select" : "Saved. Press Select to finish",
+                                 st.result_name, false);
+        } else {
+            snprintf(title, sizeof(title), "Upload failed: %s", st.result_msg);
+            display_draw_message(title, st.result_name, true);
+        }
+    } else {
+        display_draw_message("Bluetooth: " CONFIG_BT_DEVICE_NAME,
+                             st.connected ? "Connected" : "Waiting for connection", false);
+    }
+}
+
 static int wrap_index(int idx, int delta, int count) {
     return (idx + delta + count) % count;
 }
@@ -604,7 +667,7 @@ static void render_current_state(void) {
         }
 
         case STATE_BLE_UPLOAD:
-            display_draw_message("BLE Upload", "Advertising as:\nnRF EPD Reader", false);
+            render_ble_upload();
             break;
 
         case STATE_TRANSFER: {
@@ -767,6 +830,9 @@ int main(void) {
             uint32_t since = now - progress_dirty_ms;
             int32_t save_in = (since >= PROGRESS_SAVE_DELAY_MS) ? 0 : (int32_t)(PROGRESS_SAVE_DELAY_MS - since);
             if (timeout_ms < 0 || save_in < timeout_ms) timeout_ms = save_in;
+        }
+        if (current_state == STATE_BLE_UPLOAD && (timeout_ms < 0 || timeout_ms > BLE_UPLOAD_POLL_MS)) {
+            timeout_ms = BLE_UPLOAD_POLL_MS;
         }
 
         ButtonEvent evt = buttons_wait(timeout_ms);
@@ -967,9 +1033,8 @@ int main(void) {
                             current_state = STATE_USB_STORAGE;
                             break;
                         case TRANSFER_BLUETOOTH:
+                            ble_upload_enter();
                             current_state = STATE_BLE_UPLOAD;
-                            ble_init(NULL, NULL);
-                            ble_start_advertising();
                             break;
                         default:
                             current_state = STATE_MENU;
@@ -980,6 +1045,8 @@ int main(void) {
                            current_state == STATE_BLE_UPLOAD || current_state == STATE_USB_STORAGE) {
                     if (current_state == STATE_USB_STORAGE) {
                         usb_storage_exit();
+                    } else if (current_state == STATE_BLE_UPLOAD) {
+                        ble_upload_exit();
                     }
                     current_state = STATE_MENU;
                     render_current_state();
@@ -997,6 +1064,8 @@ int main(void) {
                 } else {
                     if (current_state == STATE_USB_STORAGE) {
                         usb_storage_exit();
+                    } else if (current_state == STATE_BLE_UPLOAD) {
+                        ble_upload_exit();
                     }
                     pre_sleep_state = current_state;
                     current_state = STATE_LOCKSCREEN;
@@ -1019,9 +1088,23 @@ int main(void) {
             save_prefs();
         }
 
+        if (current_state == STATE_BLE_UPLOAD) {
+            BleUploadStatus st;
+            ble_upload_get_status(&st);
+            if (st.connected) {
+                last_activity_time = k_uptime_get_32(); // no auto-sleep while a computer is linked
+            }
+            if (ble_upload_ui_key(&st) != ble_ui_key) {
+                render_current_state();
+            }
+        }
+
         if (current_state == STATE_USB_STORAGE) {
             last_activity_time = k_uptime_get_32(); // no auto-sleep while the computer has the card
         } else if (k_uptime_get_32() - last_activity_time >= AUTO_SLEEP_MS) {
+            if (current_state == STATE_BLE_UPLOAD) {
+                ble_upload_exit();
+            }
             pre_sleep_state = current_state;
             current_state = STATE_LOCKSCREEN;
             render_current_state();
