@@ -41,6 +41,10 @@ void display_app_clear(void);
 void display_update(bool full_refresh);
 // Make the next display_update a full refresh
 void display_request_full_refresh(void);
+// Portrait (240 x 416) instead of landscape for the screens drawn next; the reader,
+// lock screen and carousel are laid out for landscape only
+void display_set_portrait(bool portrait);
+bool display_is_portrait(void);
 void display_set_flipped(bool flipped);
 bool display_is_flipped(void);
 
@@ -63,12 +67,15 @@ void display_draw_icon(int x, int y, const Icon *icon, uint8_t color);
 // Main menu: focused item centred with its neighbours either side; Prev/Next rotate
 void display_draw_carousel(const CarouselItem *items, int count, int selected);
 void display_draw_menu(const char *header, const char **options, int count, int selected_idx);
-// Menus show this many rows and scroll to keep the selection visible
-#define DISPLAY_MENU_ROWS 10
+// Most rows a menu shows (portrait); display_menu_rows() gives the current number
+#define DISPLAY_MENU_ROWS 18
+int display_menu_rows(void);
 // Which options a menu of count entries shows for selected_idx, so callers can build
 // labels for the visible rows only
 void display_menu_window(int count, int selected_idx, int *first, int *visible);
 void display_draw_menu_ext(const char *header, const char *sub_footer, const char **options, int count, int selected_idx);
+// Same, without the "(n/total)" position counter in the title
+void display_draw_menu_plain(const char *header, const char *sub_footer, const char **options, int count, int selected_idx);
 void display_draw_message(const char *title, const char *msg, bool is_alert);
 void display_draw_progress(const char *task, int percentage);
 void display_draw_lockscreen(const char *book_name, const char *title, const char *author, const char *chapter_title, uint32_t progress_pct);

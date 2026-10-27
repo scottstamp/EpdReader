@@ -22,6 +22,8 @@
 
 LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
 
+#define MENU_ROW_HEIGHT 21
+
 #define EPD_CS_PIN   NRF_GPIO_PIN_MAP(0, 9)   // Pin 10 -> P0.09
 #define EPD_DC_PIN   NRF_GPIO_PIN_MAP(0, 20)  // Pin 3  -> P0.20
 #define EPD_RST_PIN  NRF_GPIO_PIN_MAP(0, 17)  // Pin 2  -> P0.17
@@ -37,6 +39,10 @@ static FontSize g_font_size = SIZE_MEDIUM;
 static LineSpacing g_line_spacing = SPACING_NORMAL;
 static ContrastMode g_contrast_mode = CONTRAST_NORMAL;
 static bool g_display_flipped = true;
+// Logical drawing size: landscape (EPD_WIDTH x EPD_HEIGHT) or, for screens that opt in, portrait
+static bool g_portrait = false;
+static int g_w = EPD_WIDTH;
+static int g_h = EPD_HEIGHT;
 
 static const struct device *epd_dev = DEVICE_DT_GET(DT_ALIAS(display0));
 
@@ -101,6 +107,16 @@ void display_power_off(void) {
 void display_app_clear(void) {
     display_clear_buffer();
     display_update(true);
+}
+
+void display_set_portrait(bool portrait) {
+    g_portrait = portrait;
+    g_w = portrait ? EPD_PHYS_WIDTH : EPD_WIDTH;
+    g_h = portrait ? EPD_PHYS_HEIGHT : EPD_HEIGHT;
+}
+
+bool display_is_portrait(void) {
+    return g_portrait;
 }
 
 void display_set_flipped(bool flipped) {
@@ -302,11 +318,20 @@ void display_update(bool full) {
 }
 
 void display_draw_pixel(int x, int y, uint8_t color) {
-    if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) return;
+    if (x < 0 || x >= g_w || y < 0 || y >= g_h) return;
 
     int phys_x, phys_y;
 
-    if (g_display_flipped) { // Rotation 3 (Flipped Landscape)
+    if (g_portrait) {
+        // Device turned a quarter clockwise from landscape; "flipped" stays 180 degrees apart
+        if (g_display_flipped) {
+            phys_x = (EPD_PHYS_WIDTH - 1) - x;
+            phys_y = (EPD_PHYS_HEIGHT - 1) - y;
+        } else {
+            phys_x = x;
+            phys_y = y;
+        }
+    } else if (g_display_flipped) { // Rotation 3 (Flipped Landscape)
         phys_x = y;
         phys_y = (EPD_PHYS_HEIGHT - 1) - x;
     } else { // Rotation 1 (Normal Landscape)
@@ -700,7 +725,7 @@ static int fit_text(const char *str, const GFXfont *font, int max_width, char *o
 
 static int display_draw_gfx_string(int x, int y, const char *str, const GFXfont *font, uint8_t color) {
     char decoded_buf[256];
-    fit_text(str, font, EPD_WIDTH - x - 5, decoded_buf, sizeof(decoded_buf));
+    fit_text(str, font, g_w - x - 5, decoded_buf, sizeof(decoded_buf));
     return display_draw_gfx_string_raw(x, y, decoded_buf, font, color);
 }
 
@@ -727,7 +752,7 @@ void display_draw_carousel(const CarouselItem *items, int count, int selected) {
     display_clear_buffer();
     display_draw_battery(battery_get_percentage());
 
-    const int center_x = EPD_WIDTH / 2;
+    const int center_x = g_w / 2;
     const CarouselItem *cur = &items[selected];
 
     // Neighbours: small and unframed, so the framed centre item reads as the focus
@@ -754,9 +779,9 @@ void display_draw_carousel(const CarouselItem *items, int count, int selected) {
     display_draw_icon(center_x - cur->icon_large->width / 2, icon_y, cur->icon_large, 0);
 
     int label_y = icon_y + cur->icon_large->height + frame + 26;
-    draw_text_centered(center_x, label_y, cur->label, &AmazonEmber_Medium12pt7b, EPD_WIDTH - 40, 0);
+    draw_text_centered(center_x, label_y, cur->label, &AmazonEmber_Medium12pt7b, g_w - 40, 0);
     if (cur->detail && cur->detail[0]) {
-        draw_text_centered(center_x, label_y + 24, cur->detail, &AmazonEmber_Medium9pt7b, EPD_WIDTH - 40, 0);
+        draw_text_centered(center_x, label_y + 24, cur->detail, &AmazonEmber_Medium9pt7b, g_w - 40, 0);
     }
 
     // Position dots
@@ -766,9 +791,9 @@ void display_draw_carousel(const CarouselItem *items, int count, int selected) {
     for (int i = 0; i < count; i++) {
         int x = dx + i * (dot + gap);
         if (i == selected) {
-            display_fill_rect(x, EPD_HEIGHT - 16, dot, dot, 0);
+            display_fill_rect(x, g_h - 16, dot, dot, 0);
         } else {
-            display_draw_rect(x, EPD_HEIGHT - 16, dot, dot, 0);
+            display_draw_rect(x, g_h - 16, dot, dot, 0);
         }
     }
 
@@ -780,7 +805,7 @@ void display_draw_string(int x, int y, const char *str, uint8_t color) {
 }
 
 void display_draw_battery(int percent) {
-    int bx = EPD_WIDTH - 65;
+    int bx = g_w - 65;
     int by = 4;
 
     display_draw_rect(bx, by, 26, 13, 0);
@@ -800,8 +825,13 @@ void display_draw_menu(const char *title, const char *options[], int count, int 
     display_draw_menu_ext(title, NULL, options, count, selected_idx);
 }
 
+// Rows between the header and the footer line: 10 in landscape, 18 in portrait
+int display_menu_rows(void) {
+    return MIN((g_h - 30) / MENU_ROW_HEIGHT, DISPLAY_MENU_ROWS);
+}
+
 void display_menu_window(int count, int selected_idx, int *first, int *visible) {
-    const int max_visible = DISPLAY_MENU_ROWS;
+    const int max_visible = display_menu_rows();
     int scroll_top = 0;
     if (count > max_visible) {
         if (selected_idx >= max_visible - 1) {
@@ -816,24 +846,39 @@ void display_menu_window(int count, int selected_idx, int *first, int *visible) 
     *visible = (count < max_visible) ? count : max_visible;
 }
 
+static void draw_menu(const char *title, const char *sub_footer, const char *options[], int count,
+                      int selected_idx, bool show_position);
+
 void display_draw_menu_ext(const char *title, const char *sub_footer, const char *options[], int count, int selected_idx) {
+    draw_menu(title, sub_footer, options, count, selected_idx, true);
+}
+
+void display_draw_menu_plain(const char *title, const char *sub_footer, const char *options[], int count, int selected_idx) {
+    draw_menu(title, sub_footer, options, count, selected_idx, false);
+}
+
+static void draw_menu(const char *title, const char *sub_footer, const char *options[], int count,
+                      int selected_idx, bool show_position) {
     display_clear_buffer();
 
     char header_buf[64];
-    if (count > 6) {
+    if (show_position && count > 6) {
         snprintf(header_buf, sizeof(header_buf), "%s (%d/%d)", title, selected_idx + 1, count);
     } else {
         snprintf(header_buf, sizeof(header_buf), "%s", title);
     }
 
-    display_draw_gfx_string(10, 15, header_buf, &AmazonEmber_Medium9pt7b, 0);
+    // Stop short of the battery icon, which matters on narrow portrait screens
+    char fitted[64];
+    fit_text(header_buf, &AmazonEmber_Medium9pt7b, g_w - 80, fitted, sizeof(fitted));
+    display_draw_gfx_string_raw(10, 15, fitted, &AmazonEmber_Medium9pt7b, 0);
     display_draw_battery(battery_get_percentage());
-    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
+    display_fill_rect(0, 20, g_w, 1, 0);
 
     int scroll_top, visible_count;
     display_menu_window(count, selected_idx, &scroll_top, &visible_count);
     int start_y = 38;
-    int item_height = 21;
+    int item_height = MENU_ROW_HEIGHT;
 
     for (int v = 0; v < visible_count; v++) {
         int i = scroll_top + v;
@@ -841,7 +886,7 @@ void display_draw_menu_ext(const char *title, const char *sub_footer, const char
 
         int y = start_y + (v * item_height);
         if (i == selected_idx) {
-            display_fill_rect(6, y - 14, EPD_WIDTH - 12, 19, 0);
+            display_fill_rect(6, y - 14, g_w - 12, 19, 0);
             display_draw_gfx_string(16, y, options[i], &AmazonEmber_Medium12pt7b, 1);
         } else {
             display_draw_gfx_string(16, y, options[i], &AmazonEmber_Medium12pt7b, 0);
@@ -849,7 +894,7 @@ void display_draw_menu_ext(const char *title, const char *sub_footer, const char
     }
 
     if (sub_footer && sub_footer[0]) {
-        display_draw_gfx_string(10, EPD_HEIGHT - 6, sub_footer, &AmazonEmber_Medium9pt7b, 0);
+        display_draw_gfx_string(10, g_h - 6, sub_footer, &AmazonEmber_Medium9pt7b, 0);
     }
 
     display_update(false);
@@ -859,7 +904,7 @@ void display_draw_message(const char *title, const char *msg, bool is_alert) {
     display_clear_buffer();
     display_draw_gfx_string(10, 15, title, &AmazonEmber_Medium9pt7b, 0);
     display_draw_battery(battery_get_percentage());
-    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
+    display_fill_rect(0, 20, g_w, 1, 0);
     display_draw_gfx_string(10, 44, msg, &AmazonEmber_Medium12pt7b, 0);
     display_update(false);
 }
@@ -868,9 +913,9 @@ void display_draw_progress(const char *task, int percentage) {
     display_clear_buffer();
     display_draw_gfx_string(10, 15, task, &AmazonEmber_Medium9pt7b, 0);
     display_draw_battery(battery_get_percentage());
-    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
-    display_draw_rect(10, 44, EPD_WIDTH - 20, 16, 0);
-    int fill_w = ((EPD_WIDTH - 20) * percentage) / 100;
+    display_fill_rect(0, 20, g_w, 1, 0);
+    display_draw_rect(10, 44, g_w - 20, 16, 0);
+    int fill_w = ((g_w - 20) * percentage) / 100;
     if (fill_w > 0) {
         display_fill_rect(10, 44, fill_w, 16, 0);
     }
@@ -982,7 +1027,7 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
         }
         display_draw_rect(cover_x, cover_y, cover_w, cover_h, 0);
 
-        // Right Half Metadata Panel (x=175 to EPD_WIDTH)
+        // Right Half Metadata Panel (x=175 to g_w)
         int right_x = 175;
 
         // Solid SLEEP MODE badge
@@ -1016,7 +1061,7 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
         display_draw_gfx_string(right_x, 158, prog_str, &AmazonEmber_Medium9pt7b, 0);
 
         // Divider line
-        display_fill_rect(right_x, 178, EPD_WIDTH - right_x - 15, 1, 0);
+        display_fill_rect(right_x, 178, g_w - right_x - 15, 1, 0);
 
         // Wake hint & Battery
         display_draw_gfx_string(right_x, 205, "Press button to wake", &AmazonEmber_Medium9pt7b, 0);
@@ -1034,7 +1079,7 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
         display_draw_battery(battery_get_percentage());
 
         // Full width divider line
-        display_fill_rect(0, 48, EPD_WIDTH, 1, 0);
+        display_fill_rect(0, 48, g_w, 1, 0);
 
         // Title (Full Width 12pt)
         if (title && title[0]) {
@@ -1063,7 +1108,7 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
         display_draw_gfx_string(left_x, 178, prog_str, &AmazonEmber_Medium9pt7b, 0);
 
         // Progress Bar Line
-        int bar_w = EPD_WIDTH - 40;
+        int bar_w = g_w - 40;
         display_draw_rect(left_x, 188, bar_w, 8, 0);
         int fill_w = (bar_w - 4) * progress_pct / 100;
         if (fill_w > 0) {
@@ -1108,9 +1153,9 @@ static uint32_t layout_reader_text(const char *text_page, bool draw, uint8_t sty
     int line_height = font_height + ((g_line_spacing == SPACING_COMPACT) ? 4 : ((g_line_spacing == SPACING_RELAXED) ? 10 : 7));
 
     int margin_top = 41; // +3px top padding below header bar
-    int margin_bottom = EPD_HEIGHT - 6;
+    int margin_bottom = g_h - 6;
     int margin_left = 10;
-    int max_width = EPD_WIDTH - 20;
+    int max_width = g_w - 20;
 
     int cur_y = margin_top;
     int max_y = margin_bottom - font_height + 4;
@@ -1222,13 +1267,13 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
     // Header Title & Battery Icon on Top Bar
     display_draw_gfx_string(10, 15, book_name, &AmazonEmber_Medium9pt7b, 0);
     display_draw_battery(battery_get_percentage());
-    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
+    display_fill_rect(0, 20, g_w, 1, 0);
 
     uint32_t consumed = layout_reader_text(text_page, true, style_in);
 
-    int bar_y = EPD_HEIGHT - 6;
-    display_draw_rect(8, bar_y, EPD_WIDTH - 16, 4, 0);
-    int fill_w = ((EPD_WIDTH - 16) * progress_pct) / 100;
+    int bar_y = g_h - 6;
+    display_draw_rect(8, bar_y, g_w - 16, 4, 0);
+    int fill_w = ((g_w - 16) * progress_pct) / 100;
     if (fill_w > 0) {
         display_fill_rect(8, bar_y, fill_w, 4, 0);
     }

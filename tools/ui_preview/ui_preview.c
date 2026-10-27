@@ -48,17 +48,23 @@ bool epub_extract_cover_image(const EpubBook *b, uint8_t *g, int w, int h) {
 }
 
 // Writes the logical 416x240 landscape view (flipped orientation, the default)
+// Writes the logical view as seen by the user: 416x240 landscape or 240x416 portrait,
+// in the default (flipped) orientation, mirroring display_draw_pixel's mapping
 static void dump(const char *path) {
+    bool portrait = display_is_portrait();
+    int w = portrait ? EPD_PHYS_WIDTH : EPD_WIDTH;
+    int h = portrait ? EPD_PHYS_HEIGHT : EPD_HEIGHT;
     FILE *f = fopen(path, "wb");
-    fprintf(f, "P4\n%d %d\n", EPD_WIDTH, EPD_HEIGHT);
-    for (int y = 0; y < EPD_HEIGHT; y++) {
+    fprintf(f, "P4\n%d %d\n", w, h);
+    for (int y = 0; y < h; y++) {
         uint8_t row[(EPD_WIDTH + 7) / 8] = {0};
-        for (int x = 0; x < EPD_WIDTH; x++) {
-            int px = y, py = (EPD_PHYS_HEIGHT - 1) - x;
+        for (int x = 0; x < w; x++) {
+            int px = portrait ? (EPD_PHYS_WIDTH - 1) - x : y;
+            int py = portrait ? (EPD_PHYS_HEIGHT - 1) - y : (EPD_PHYS_HEIGHT - 1) - x;
             int white = (last_fb[px / 8 + py * (EPD_PHYS_WIDTH / 8)] >> (7 - px % 8)) & 1;
             if (!white) row[x / 8] |= 0x80 >> (x % 8); // PBM: 1 = black
         }
-        fwrite(row, 1, sizeof(row), f);
+        fwrite(row, 1, (w + 7) / 8, f);
     }
     fclose(f);
 }
@@ -218,15 +224,21 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof(path), "%s/settings.pbm", argv[1]);
     dump(path);
 
-    // Lists screens as main.c builds them
-    const char *lists_menu[] = { "Groceries  (1/3)", "To-do  (0/2)", "[Back]" };
-    display_draw_menu_ext("Lists", "Bluetooth: browser connected", lists_menu, 3, 0);
+    // The lists screens run in portrait
+    display_set_portrait(true);
+    const char *lists_portrait[] = { "Groceries  (1/3)", "To-do  (0/2)", "Hardware store  (0/4)", "[Back]" };
+    display_draw_menu_ext("Lists", "Bluetooth: ready to sync", lists_portrait, 4, 0);
     snprintf(path, sizeof(path), "%s/lists.pbm", argv[1]);
     dump(path);
-    const char *items_menu[] = { "[  ] Milk", "[x] Eggs", "[  ] Crème fraîche", "Clear checked", "[Back]" };
-    display_draw_menu_ext("Groceries (1/3)", "Edit in a browser over Bluetooth", items_menu, 5, 1);
+    const char *items_menu[] = { "[  ] Milk", "[x] Eggs", "[  ] Crème fraîche", "[  ] Sourdough bread",
+                                 "[x] Bananas", "[  ] Greek yoghurt", "[  ] Olive oil (extra virgin, large)",
+                                 "[  ] Coffee beans", "[  ] Tomatoes", "[  ] Basil", "[  ] Parmesan",
+                                 "[  ] Spaghetti", "[  ] Dish soap", "[  ] Paper towels", "[  ] Apples",
+                                 "Clear checked", "[Back]" };
+    display_draw_menu_plain("Groceries (2/15)", "Browser connected", items_menu, 17, 1);
     snprintf(path, sizeof(path), "%s/list_items.pbm", argv[1]);
     dump(path);
+    display_set_portrait(false);
 
     // Menus and headers use the built-in fonts: accents fall back to ASCII
     const char *accented_menu[] = { "Les Misérables — Victor Hugo", "Cien años de soledad", "Über “Quotes” … 5 €",

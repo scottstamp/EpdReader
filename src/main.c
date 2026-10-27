@@ -404,12 +404,14 @@ static int open_list_idx = 0;
 static int selected_item_idx = 0;   // == item_count: "Clear checked", +1: "[Back]"
 
 static void lists_enter(void) {
+    display_set_portrait(true);  // tall lists: more items per screen
     lists_load();
     selected_list_idx = 0;
     lists_active = (lists_ble_start((uint8_t *)scan_buf, sizeof(scan_buf)) == 0);
 }
 
 static void lists_exit(void) {
+    display_set_portrait(false);
     if (lists_active) {
         lists_ble_stop();
         lists_active = false;
@@ -423,7 +425,7 @@ static bool in_lists_screens(void) {
 static const char *lists_footer(void) {
     lists_shown_connected = lists_active && lists_ble_connected();
     if (!lists_active) return "Bluetooth unavailable";
-    return lists_shown_connected ? "Bluetooth: browser connected" : "Edit in a browser over Bluetooth";
+    return lists_shown_connected ? "Browser connected" : "Bluetooth: ready to sync";
 }
 
 static void render_lists(void) {
@@ -445,7 +447,7 @@ static void render_lists(void) {
         options[i] = labels[i - first];
     }
     options[count] = "[Back]";
-    display_draw_menu_ext("Lists", lists_footer(), options, count + 1, selected_list_idx);
+    display_draw_menu_plain("Lists", lists_footer(), options, count + 1, selected_list_idx);
 }
 
 static void render_list_items(void) {
@@ -471,7 +473,7 @@ static void render_list_items(void) {
 
     char title[LISTS_TEXT_MAX + 16];
     snprintf(title, sizeof(title), "%.*s (%d/%d)", l->name_len, doc->text + l->name_off, done, count);
-    display_draw_menu_ext(title, lists_footer(), options, count + 2, selected_item_idx);
+    display_draw_menu_plain(title, lists_footer(), options, count + 2, selected_item_idx);
 }
 
 // After the lists were replaced from a browser, keep the selection on something that exists
