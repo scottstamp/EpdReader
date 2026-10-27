@@ -141,6 +141,31 @@ async def main():
         check(not upload.ble_name_valid("../evil.epub") and upload.ble_name_valid("a.epub"),
               "client name check")
 
+        # Lossy link (Windows can drop write-without-response): uploads still complete
+        for name, drop_rate, seed in (("lossy.epub", 0.02, 7), ("very_lossy.txt", 0.15, 8)):
+            data = bytes(rnd.getrandbits(8) for _ in range(40_000))
+            link = SimLink(exe, store, 1024, 3)
+            lossy = random.Random(seed)
+            dropped = 0
+
+            async def lossy_write(frame: bytes, response: bool, link=link, lossy=lossy):
+                nonlocal dropped
+                if frame[0] == upload.BLE_OP_DATA and not response and lossy.random() < drop_rate:
+                    dropped += 1
+                    return
+                await link.write(frame, response)
+
+            try:
+                await upload.ble_send_book(lossy_write, link.events, name, data, 244, timeout=5.0)
+                with open(os.path.join(store, name), "rb") as f:
+                    check(f.read() == data, "stored content differs")
+                print(f"ok   {name}: recovered from {dropped} dropped frames")
+            except Exception as e:
+                failures += 1
+                print(f"FAIL {name}: {e!r}")
+            finally:
+                link.close()
+
         # A client that ignores the window is caught by the device
         link = SimLink(exe, store, 256, 1000)
         try:

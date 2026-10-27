@@ -14,18 +14,25 @@
 //   ACK    82 | written u32                          (bytes stored so far)
 //   DONE   83 | size u32 | crc32 u32                 (file verified and saved)
 //   ERROR  84 | code u8 | offset u32
+//   RESEND 85 | offset u32                           (gap: resend from offset)
 //
 // Flow control: the client keeps at most `window` payload bytes sent but not
 // yet acknowledged; the device buffers that much and acks as it writes to SD,
 // at least every window/4 bytes and once all `size` bytes are stored. DATA is
 // sent as write-without-response; START/END wait for the previous step's
 // notification, so they cannot overtake data.
+//
+// Recovery: some hosts (Windows) occasionally drop a write-without-response.
+// On a gap the device sends one RESEND and ignores data until that offset
+// arrives; the client rewinds to it. Data before the expected offset is
+// dropped (or trimmed if a frame straddles it), so a client may also rewind to
+// its last ACK if acks stall.
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define UP_VERSION 1
+#define UP_VERSION 2  // v2: RESEND recovery
 
 #define UP_OP_START 0x01
 #define UP_OP_DATA  0x02
@@ -35,7 +42,11 @@
 #define UP_EVT_READY 0x81
 #define UP_EVT_ACK   0x82
 #define UP_EVT_DONE  0x83
-#define UP_EVT_ERROR 0x84
+#define UP_EVT_ERROR  0x84
+#define UP_EVT_RESEND 0x85
+
+// Gaps tolerated per transfer before giving up with UP_ERR_OFFSET
+#define UP_MAX_RESENDS 64
 
 #define UP_START_HDR_LEN 10
 #define UP_DATA_HDR_LEN  5
@@ -89,6 +100,9 @@ typedef struct {
     uint32_t crc_expected;
     uint32_t rx_offset;
     uint32_t err_offset;
+    bool awaiting_resend;   // gap seen, ignoring data until rx_offset arrives
+    bool resend_pending;    // worker must send RESEND rx_offset
+    uint16_t resends;
 
     // Byte ring of DATA payloads; head/tail are free-running counters
     uint8_t *ring;

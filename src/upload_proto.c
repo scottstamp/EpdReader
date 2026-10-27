@@ -112,6 +112,9 @@ static bool rx_start(up_session *s, const uint8_t *f, size_t len) {
     s->size = get_u32(f + 2);
     s->crc_expected = get_u32(f + 6);
     s->rx_offset = 0;
+    s->awaiting_resend = false;
+    s->resend_pending = false;
+    s->resends = 0;
     s->head = 0;
     s->tail = 0;
     s->end_requested = false;
@@ -124,11 +127,27 @@ static bool rx_data(up_session *s, const uint8_t *f, size_t len) {
     if (len <= UP_DATA_HDR_LEN) return rx_fail(s, UP_ERR_BAD_FRAME, s->rx_offset, true);
     uint32_t offset = get_u32(f + 1);
     uint32_t n = (uint32_t)(len - UP_DATA_HDR_LEN);
-    if (offset != s->rx_offset) return rx_fail(s, UP_ERR_OFFSET, s->rx_offset, true);
+    const uint8_t *src = f + UP_DATA_HDR_LEN;
+
+    if (offset > s->rx_offset) {
+        // A frame went missing: ask once for a resend, then wait for that offset
+        if (s->awaiting_resend) return false;
+        if (++s->resends > UP_MAX_RESENDS) return rx_fail(s, UP_ERR_OFFSET, s->rx_offset, true);
+        s->awaiting_resend = true;
+        s->resend_pending = true;
+        return true;
+    }
+    if (offset < s->rx_offset) {
+        // Resent data we already have; keep only the part past rx_offset
+        uint32_t skip = s->rx_offset - offset;
+        if (skip >= n) return false;
+        src += skip;
+        n -= skip;
+    }
+    s->awaiting_resend = false;
     if (s->end_requested || n > s->size - s->rx_offset) return rx_fail(s, UP_ERR_SIZE, s->rx_offset, true);
     if (n > s->ring_cap - (s->head - s->tail)) return rx_fail(s, UP_ERR_OVERRUN, s->rx_offset, true);
 
-    const uint8_t *src = f + UP_DATA_HDR_LEN;
     uint32_t idx = s->head % s->ring_cap;
     uint32_t first = s->ring_cap - idx;
     if (first > n) first = n;
@@ -177,6 +196,13 @@ static void send_ready(up_session *s, const up_io *io) {
     if (max_data > window / 4) max_data = (uint16_t)(window / 4);
     put_u32(ev + 2, window);
     put_u16(ev + 6, max_data);
+    io->notify(io->ctx, ev, sizeof(ev));
+}
+
+static void send_resend(const up_io *io, uint32_t offset) {
+    uint8_t ev[5];
+    ev[0] = UP_EVT_RESEND;
+    put_u32(ev + 1, offset);
     io->notify(io->ctx, ev, sizeof(ev));
 }
 
@@ -276,7 +302,14 @@ void up_worker_run(up_session *s, const up_io *io) {
         uint32_t tail = s->tail;
         uint32_t avail = s->head - s->tail;
         bool end = s->end_requested;
+        bool resend = (state == UP_RECEIVING) && s->resend_pending;
+        uint32_t resend_offset = s->rx_offset;
+        s->resend_pending = false;
         io->unlock(io->ctx);
+
+        if (resend) {
+            send_resend(io, resend_offset);
+        }
 
         if (state == UP_FAILING) {
             handle_failure(s, io);

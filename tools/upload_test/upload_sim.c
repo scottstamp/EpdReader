@@ -348,19 +348,39 @@ static void test_errors(void) {
     expect_failed(UP_ERR_CRC, true);
     CHECK(s.result_seq == 1 && s.result_err == UP_ERR_CRC);
 
-    // Gap in offsets, then a fresh START recovers
+    // Lost frame: one RESEND, later frames ignored until the missing offset arrives
     reset();
     start_t(sizeof(data), crc);
     rx(b, mk_data(b, 0, data, 10));
-    rx(b, mk_data(b, 20, data, 10));
-    expect_failed(UP_ERR_OFFSET, true);
-    CHECK(ev_u32(fk.nev - 1, 2) == 10);
-    start_t(sizeof(data), crc);
-    CHECK(send_all(data, sizeof(data), 10) == 0);
+    CHECK(rx(b, mk_data(b, 20, data + 20, 10)));   // gap at 10
+    CHECK(!rx(b, mk_data(b, 30, data + 30, 10)));  // still waiting, no second RESEND
+    up_worker_run(&s, &io);
+    CHECK(last_ev() == UP_EVT_RESEND && ev_u32(fk.nev - 1, 1) == 10);
+    // Client rewinds to its last ack (5) with frames straddling the expected offset
+    rx(b, mk_data(b, 5, data + 5, 10));            // bytes 5..14: keeps 10..14
+    for (uint32_t off = 15; off < sizeof(data); off += 10) {
+        uint32_t n = sizeof(data) - off < 10 ? sizeof(data) - off : 10;
+        rx(b, mk_data(b, off, data + off, n));
+        up_worker_run(&s, &io);
+    }
     rx((const uint8_t[]){ UP_OP_END }, 1);
     up_worker_run(&s, &io);
     CHECK(last_ev() == UP_EVT_DONE);
+    CHECK(file_equals("t.txt", data, sizeof(data)));
     rm_file("t.txt");
+
+    // Too many gaps in one transfer fails it
+    reset();
+    start_t(sizeof(data), crc);
+    for (uint32_t i = 0; i < UP_MAX_RESENDS; i++) {
+        rx(b, mk_data(b, 99, data + 99, 1));       // gap
+        up_worker_run(&s, &io);
+        CHECK(last_ev() == UP_EVT_RESEND && ev_u32(fk.nev - 1, 1) == i);
+        rx(b, mk_data(b, i, data + i, 1));         // the requested byte clears the wait
+        up_worker_run(&s, &io);
+    }
+    rx(b, mk_data(b, 99, data + 99, 1));           // one gap too many
+    expect_failed(UP_ERR_OFFSET, true);
 
     // Client ignores the window
     reset();
@@ -371,9 +391,11 @@ static void test_errors(void) {
     // Frames after an error are dropped until it is reported
     reset();
     start_t(sizeof(data), crc);
-    rx(b, mk_data(b, 5, data, 10));
+    uint8_t big[150];
+    memset(big, 0x5A, sizeof(big));
+    rx(b, mk_data(b, 0, big, sizeof(big)));         // more than the announced size
     CHECK(!rx(b, mk_data(b, 0, data, 10)));
-    expect_failed(UP_ERR_OFFSET, true);
+    expect_failed(UP_ERR_SIZE, true);
     CHECK(fk.nev == 2);
 
     // Disconnect mid-transfer: nothing to notify, partial file removed

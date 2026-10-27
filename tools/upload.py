@@ -268,9 +268,9 @@ NUS_RX_UUID      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # we write frames he
 NUS_TX_UUID      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # device notifies here
 BLE_DEVICE_NAME  = "nRF EPD Reader"
 
-BLE_PROTO_VERSION = 1
+BLE_PROTO_VERSION = 2   # v2: RESEND recovery
 BLE_OP_START, BLE_OP_DATA, BLE_OP_END, BLE_OP_ABORT = 0x01, 0x02, 0x03, 0x04
-BLE_EVT_READY, BLE_EVT_ACK, BLE_EVT_DONE, BLE_EVT_ERROR = 0x81, 0x82, 0x83, 0x84
+BLE_EVT_READY, BLE_EVT_ACK, BLE_EVT_DONE, BLE_EVT_ERROR, BLE_EVT_RESEND = 0x81, 0x82, 0x83, 0x84, 0x85
 BLE_ATT_OVERHEAD  = 3       # ATT write header
 BLE_DATA_HDR      = 5       # DATA opcode + offset
 BLE_NAME_MAX      = 63      # characters, printable ASCII
@@ -320,7 +320,7 @@ def ble_check_event(ev: bytes) -> int:
     if ev[0] == BLE_EVT_ERROR and len(ev) >= 6:
         code, offset = struct.unpack_from("<BI", ev, 1)
         raise BleUploadError(f"device reported: {BLE_ERRORS.get(code, f'error {code}')} (at byte {offset})")
-    sizes = {BLE_EVT_READY: 8, BLE_EVT_ACK: 5, BLE_EVT_DONE: 9}
+    sizes = {BLE_EVT_READY: 8, BLE_EVT_ACK: 5, BLE_EVT_DONE: 9, BLE_EVT_RESEND: 5}
     if ev[0] not in sizes or len(ev) < sizes[ev[0]]:
         raise BleUploadError(f"unexpected notification: {ev.hex()}")
     return ev[0]
@@ -349,29 +349,63 @@ async def ble_send_book(write, events: asyncio.Queue, name: str, data: bytes,
     chunk = max(1, min(max_payload, dev_max))
 
     acked = 0
+    sent = 0
+    rewinds = 0
+
+    def rewind(offset: int, why: str) -> None:
+        # Windows can silently drop a write-without-response; the device asks
+        # for a resend (or acks stall) and we go back to the missing byte
+        nonlocal sent, rewinds
+        rewinds += 1
+        if rewinds > 200:
+            raise BleUploadError(f"too many lost packets ({why})")
+        sent = max(acked, min(sent, offset))
 
     def handle(ev: bytes) -> None:
         nonlocal acked
-        if ble_check_event(ev) != BLE_EVT_ACK:
+        code = ble_check_event(ev)
+        if code == BLE_EVT_RESEND:
+            rewind(struct.unpack_from("<I", ev, 1)[0], "resend requested")
+            return
+        if code != BLE_EVT_ACK:
             raise BleUploadError(f"unexpected notification: {ev.hex()}")
         acked = max(acked, struct.unpack_from("<I", ev, 1)[0])
 
-    sent = 0
+    async def wait_for_ack() -> None:
+        # Short waits: if acks stop while data is outstanding, a frame was lost
+        # without the device noticing yet (e.g. the resent one), so rewind
+        stalled = 0.0
+        while True:
+            try:
+                handle(await asyncio.wait_for(events.get(), 1.0))
+                return
+            except asyncio.TimeoutError:
+                stalled += 1.0
+                if stalled >= timeout:
+                    raise BleUploadError("device stopped responding") from None
+                if sent > acked:
+                    rewind(acked, "acks stalled")
+                    return
+
     while sent < size:
-        n = min(chunk, size - sent)
         # Never more than `window` unacknowledged bytes: the device buffers exactly that much
-        while sent + n - acked > window:
-            handle(await next_event())
+        while sent + min(chunk, size - sent) - acked > window:
+            await wait_for_ack()
         while not events.empty():
             handle(events.get_nowait())
+        n = min(chunk, size - sent)
+        if n <= 0:
+            continue
         await write(ble_frame_data(sent, data[sent:sent + n]), False)
         sent += n
         if progress:
             progress(acked, size)
+        # END waits for the final ACK so it cannot overtake data still in flight
+        while sent >= size and acked < size:
+            await wait_for_ack()
 
-    # END waits for the final ACK so it cannot overtake data still in flight
-    while acked < size:
-        handle(await next_event())
+    if rewinds:
+        print(f"\n  (recovered from {rewinds} lost packet(s))")
     if progress:
         progress(size, size)
     await write(bytes([BLE_OP_END]), True)
