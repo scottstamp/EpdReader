@@ -384,6 +384,8 @@ static void ble_upload_exit(void) {
     if (ble_upload_active) {
         ble_upload_stop();
         ble_upload_active = false;
+        // An upload may have replaced the open book; drop its in-RAM index so it reloads
+        storage_forget_cached_book();
     }
 }
 

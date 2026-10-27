@@ -137,6 +137,10 @@ int storage_init(void) {
     return 0;
 }
 
+void storage_forget_cached_book(void) {
+    s_epub_cached = false;
+}
+
 // The FAT volume must not be mounted while the host writes the card over USB
 int storage_release_for_usb(void) {
     s_epub_cached = false;

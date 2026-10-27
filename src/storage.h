@@ -33,6 +33,8 @@ int storage_list_sd_books(BookList *list);
 uint32_t storage_get_book_size(const char *book_name);
 bool storage_get_book_metadata(const char *book_name, char *title_out, size_t title_max, char *author_out, size_t author_max);
 bool storage_get_book_display_title(const char *book_name, char *out_str, size_t max_len);
+// Drops the in-RAM book index, e.g. after the book file was replaced
+void storage_forget_cached_book(void);
 // Loaded EPUB index for book_name (converted on first open), NULL for non-EPUB books
 const EpubBook *storage_get_epub(const char *book_name);
 bool storage_read_book_page(const char *book_name, uint32_t offset, char *page_buf, size_t buf_size, uint32_t *bytes_read);
