@@ -48,6 +48,10 @@ void epub_set_progress_cb(epub_progress_cb_t cb);
 // /SD:/cache. Chapter cum_offset/text_length are byte offsets into that file.
 bool epub_scan_chapters(const char *epub_path, EpubBook *book);
 void epub_build_text_path(const char *epub_path, char *out, size_t max_len);
+// Title, author and text length from a converted book's index header, without loading
+// the chapter table. False if the book has not been converted (or the cache is stale).
+bool epub_read_cached_metadata(const char *epub_path, char *title, size_t title_max,
+                               char *author, size_t author_max, uint32_t *total_len);
 bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int target_w, int target_h);
 
 #endif // EPUB_H
