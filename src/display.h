@@ -76,6 +76,9 @@ void display_menu_window(int count, int selected_idx, int *first, int *visible);
 void display_draw_menu_ext(const char *header, const char *sub_footer, const char **options, int count, int selected_idx);
 // Same, without the "(n/total)" position counter in the title
 void display_draw_menu_plain(const char *header, const char *sub_footer, const char **options, int count, int selected_idx);
+// Plain menu whose rows can start with a checkbox: checks[i] = 1 checked, 0 unchecked, -1 none
+void display_draw_checklist(const char *header, const char *sub_footer, const char **options, const int8_t *checks,
+                            int count, int selected_idx);
 void display_draw_message(const char *title, const char *msg, bool is_alert);
 void display_draw_progress(const char *task, int percentage);
 void display_draw_lockscreen(const char *book_name, const char *title, const char *author, const char *chapter_title, uint32_t progress_pct);

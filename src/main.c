@@ -457,23 +457,28 @@ static void render_list_items(void) {
     int first, visible;
     display_menu_window(count + 2, selected_item_idx, &first, &visible);
 
-    char labels[DISPLAY_MENU_ROWS][LISTS_TEXT_MAX + 8];
+    char labels[DISPLAY_MENU_ROWS][LISTS_TEXT_MAX + 1];
     const char *options[LISTS_MAX_ITEMS + 2];
-    for (int i = 0; i < count + 2; i++) options[i] = "";
+    int8_t checks[LISTS_MAX_ITEMS + 2];
     int done = 0;
-    for (int k = 0; k < count; k++) done += doc->items[l->first_item + k].checked;
+    for (int i = 0; i < count; i++) {
+        bool checked = doc->items[l->first_item + i].checked;
+        done += checked;
+        checks[i] = checked ? 1 : 0;
+        options[i] = "";
+    }
     for (int i = first; i < first + visible && i < count; i++) {
         const ListsItem *it = &doc->items[l->first_item + i];
-        snprintf(labels[i - first], sizeof(labels[0]), "%s %.*s", it->checked ? "[x]" : "[  ]",
-                 it->text_len, doc->text + it->line_off + 4);
+        snprintf(labels[i - first], sizeof(labels[0]), "%.*s", it->text_len, doc->text + it->line_off + 4);
         options[i] = labels[i - first];
     }
     options[count] = "Clear checked";
     options[count + 1] = "[Back]";
+    checks[count] = checks[count + 1] = -1;
 
     char title[LISTS_TEXT_MAX + 16];
     snprintf(title, sizeof(title), "%.*s (%d/%d)", l->name_len, doc->text + l->name_off, done, count);
-    display_draw_menu_plain(title, lists_footer(), options, count + 2, selected_item_idx);
+    display_draw_checklist(title, lists_footer(), options, checks, count + 2, selected_item_idx);
 }
 
 // After the lists were replaced from a browser, keep the selection on something that exists

@@ -230,12 +230,11 @@ int main(int argc, char **argv) {
     display_draw_menu_ext("Lists", "Bluetooth: ready to sync", lists_portrait, 4, 0);
     snprintf(path, sizeof(path), "%s/lists.pbm", argv[1]);
     dump(path);
-    const char *items_menu[] = { "[  ] Milk", "[x] Eggs", "[  ] Crème fraîche", "[  ] Sourdough bread",
-                                 "[x] Bananas", "[  ] Greek yoghurt", "[  ] Olive oil (extra virgin, large)",
-                                 "[  ] Coffee beans", "[  ] Tomatoes", "[  ] Basil", "[  ] Parmesan",
-                                 "[  ] Spaghetti", "[  ] Dish soap", "[  ] Paper towels", "[  ] Apples",
-                                 "Clear checked", "[Back]" };
-    display_draw_menu_plain("Groceries (2/15)", "Browser connected", items_menu, 17, 1);
+    const char *items_menu[] = { "Milk", "Eggs", "Crème fraîche", "Sourdough bread", "Bananas", "Greek yoghurt",
+                                 "Olive oil (extra virgin, large)", "Coffee beans", "Tomatoes", "Basil", "Parmesan",
+                                 "Spaghetti", "Dish soap", "Paper towels", "Apples", "Clear checked", "[Back]" };
+    const int8_t item_checks[] = { 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1 };
+    display_draw_checklist("Groceries (2/15)", "Browser connected", items_menu, item_checks, 17, 1);
     snprintf(path, sizeof(path), "%s/list_items.pbm", argv[1]);
     dump(path);
     display_set_portrait(false);

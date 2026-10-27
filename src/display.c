@@ -846,19 +846,24 @@ void display_menu_window(int count, int selected_idx, int *first, int *visible) 
     *visible = (count < max_visible) ? count : max_visible;
 }
 
-static void draw_menu(const char *title, const char *sub_footer, const char *options[], int count,
-                      int selected_idx, bool show_position);
+static void draw_menu(const char *title, const char *sub_footer, const char *options[], const int8_t *checks,
+                      int count, int selected_idx, bool show_position);
 
 void display_draw_menu_ext(const char *title, const char *sub_footer, const char *options[], int count, int selected_idx) {
-    draw_menu(title, sub_footer, options, count, selected_idx, true);
+    draw_menu(title, sub_footer, options, NULL, count, selected_idx, true);
 }
 
 void display_draw_menu_plain(const char *title, const char *sub_footer, const char *options[], int count, int selected_idx) {
-    draw_menu(title, sub_footer, options, count, selected_idx, false);
+    draw_menu(title, sub_footer, options, NULL, count, selected_idx, false);
 }
 
-static void draw_menu(const char *title, const char *sub_footer, const char *options[], int count,
-                      int selected_idx, bool show_position) {
+void display_draw_checklist(const char *title, const char *sub_footer, const char *options[], const int8_t *checks,
+                            int count, int selected_idx) {
+    draw_menu(title, sub_footer, options, checks, count, selected_idx, false);
+}
+
+static void draw_menu(const char *title, const char *sub_footer, const char *options[], const int8_t *checks,
+                      int count, int selected_idx, bool show_position) {
     display_clear_buffer();
 
     char header_buf[64];
@@ -885,12 +890,23 @@ static void draw_menu(const char *title, const char *sub_footer, const char *opt
         if (i >= count) break;
 
         int y = start_y + (v * item_height);
+        uint8_t ink = (i == selected_idx) ? 1 : 0;  // the selected row is drawn inverted
         if (i == selected_idx) {
             display_fill_rect(6, y - 14, g_w - 12, 19, 0);
-            display_draw_gfx_string(16, y, options[i], &AmazonEmber_Medium12pt7b, 1);
-        } else {
-            display_draw_gfx_string(16, y, options[i], &AmazonEmber_Medium12pt7b, 0);
         }
+        int text_x = 16;
+        if (checks && checks[i] >= 0) {
+            // Checkbox: 2 px outline when open, solid when checked
+            const int box = 13, bx = 16, by = y - 12;
+            if (checks[i] > 0) {
+                display_fill_rect(bx, by, box, box, ink);
+            } else {
+                display_draw_rect(bx, by, box, box, ink);
+                display_draw_rect(bx + 1, by + 1, box - 2, box - 2, ink);
+            }
+            text_x = bx + box + 7;
+        }
+        display_draw_gfx_string(text_x, y, options[i], &AmazonEmber_Medium12pt7b, ink);
     }
 
     if (sub_footer && sub_footer[0]) {
