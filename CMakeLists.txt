@@ -18,7 +18,10 @@ target_sources(app PRIVATE
     src/buttons.c
     src/ble.c
     src/battery.c
+    src/prefs.c
     src/puff.c
+    src/inflate_stream.c
+    src/html_text.c
     src/epub.c
     src/font_extended.c
 )

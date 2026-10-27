@@ -23,7 +23,6 @@
 
 // Path mountpoints
 #define SD_MOUNT_POINT "/SD:"
-#define LFS_MOUNT_POINT "/lfs:"
 #define BOOK_DIR "/SD:/books"
 #define PROGRESS_FILE "/SD:/progress.dat"
 #define STATS_FILE "/SD:/stats.dat"

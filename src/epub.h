@@ -38,10 +38,16 @@ typedef struct {
     EpubChapterInfo chapters[MAX_EPUB_CHAPTERS];
 } EpubBook;
 
+// Called with 0..100 while a book is converted to its plain-text cache
+typedef void (*epub_progress_cb_t)(int percent);
+
 // EPUB API
+void epub_set_progress_cb(epub_progress_cb_t cb);
+
+// Indexes the book and, on first open, converts it to a plain-text file in
+// /SD:/cache. Chapter cum_offset/text_length are byte offsets into that file.
 bool epub_scan_chapters(const char *epub_path, EpubBook *book);
-bool epub_read_chapter_text(const char *epub_path, const EpubChapterInfo *chap_info, char *text_out, uint32_t text_max_len);
-bool epub_read_book_offset(EpubBook *book, uint32_t global_offset, char *page_buf, size_t buf_size, uint32_t *bytes_read);
-bool epub_extract_cover_image(const char *epub_path, uint8_t *gray_out, int target_w, int target_h);
+void epub_build_text_path(const char *epub_path, char *out, size_t max_len);
+bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int target_w, int target_h);
 
 #endif // EPUB_H

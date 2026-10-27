@@ -1,5 +1,7 @@
 #include "epub.h"
 #include "puff.h"
+#include "inflate_stream.h"
+#include "html_text.h"
 #include <zephyr/kernel.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/logging/log.h>
@@ -10,8 +12,24 @@
 
 LOG_MODULE_REGISTER(epub, LOG_LEVEL_INF);
 
-static uint8_t s_comp_buf[10240];   // 10 KB static compressed payload buffer
-static char s_raw_html_buf[16384];  // 16 KB static inflated HTML buffer
+// Book conversion and cover extraction never run at the same time, so they share one work area
+static union {
+    struct {
+        uint8_t window[INFLATE_WINDOW_SIZE];
+        uint8_t in[1024];
+    } text;
+    struct {
+        uint8_t comp[10240];  // compressed cover payload
+        uint8_t raw[16384];   // inflated cover payload
+    } cover;
+} s_work;
+
+static HtmlText s_html;
+static epub_progress_cb_t s_progress_cb;
+
+void epub_set_progress_cb(epub_progress_cb_t cb) {
+    s_progress_cb = cb;
+}
 
 static int my_strncasecmp(const char *s1, const char *s2, size_t n) {
     while (n && *s1 && *s2) {
@@ -44,215 +62,6 @@ static const char *my_strcasestr(const char *haystack, const char *needle) {
         }
     }
     return NULL;
-}
-
-static void strip_html_and_entities(const char *html_in, char *text_out, uint32_t max_out) {
-    const char *p = html_in;
-    uint32_t out_idx = 0;
-    bool in_tag = false;
-    bool last_was_space = false;
-
-    while (*p && out_idx < max_out - 1) {
-        // Skip <head>...</head>, <style>...</style>, <script>...</script>, <svg>...</svg>
-        if (my_strncasecmp(p, "<head", 5) == 0) {
-            const char *end = my_strcasestr(p, "</head>");
-            if (end) { p = end + 7; continue; }
-        }
-        if (my_strncasecmp(p, "<style", 6) == 0) {
-            const char *end = my_strcasestr(p, "</style>");
-            if (end) { p = end + 8; continue; }
-        }
-        if (my_strncasecmp(p, "<script", 7) == 0) {
-            const char *end = my_strcasestr(p, "</script>");
-            if (end) { p = end + 9; continue; }
-        }
-        if (my_strncasecmp(p, "<svg", 4) == 0) {
-            const char *end = my_strcasestr(p, "</svg>");
-            if (end) { p = end + 6; continue; }
-        }
-
-        if (*p == '<') {
-            in_tag = true;
-
-            const char *tag_end = strchr(p, '>');
-            size_t tag_len = tag_end ? (size_t)(tag_end - p) : 0;
-
-            // --- XHTML TAG PARSER ---
-            // Italics / Emphasis
-            if (my_strncasecmp(p, "<i>", 3) == 0 || my_strncasecmp(p, "<i ", 3) == 0 ||
-                my_strncasecmp(p, "<em>", 4) == 0 || my_strncasecmp(p, "<em ", 4) == 0 ||
-                my_strncasecmp(p, "<cite>", 6) == 0 || my_strncasecmp(p, "<cite ", 6) == 0) {
-                text_out[out_idx++] = '\x0E';
-            } else if (my_strncasecmp(p, "</i>", 4) == 0 || my_strncasecmp(p, "</em>", 5) == 0 ||
-                       my_strncasecmp(p, "</cite>", 7) == 0) {
-                text_out[out_idx++] = '\x0F';
-            }
-
-            // Bold / Strong
-            if (my_strncasecmp(p, "<b>", 3) == 0 || my_strncasecmp(p, "<b ", 3) == 0 ||
-                my_strncasecmp(p, "<strong>", 8) == 0 || my_strncasecmp(p, "<strong ", 8) == 0) {
-                text_out[out_idx++] = '\x02';
-            } else if (my_strncasecmp(p, "</b>", 4) == 0 || my_strncasecmp(p, "</strong>", 9) == 0) {
-                text_out[out_idx++] = '\x03';
-            }
-
-            // Underline / Inserted
-            if (my_strncasecmp(p, "<u>", 3) == 0 || my_strncasecmp(p, "<u ", 3) == 0 ||
-                my_strncasecmp(p, "<ins>", 5) == 0 || my_strncasecmp(p, "<ins ", 5) == 0) {
-                text_out[out_idx++] = '\x15';
-            } else if (my_strncasecmp(p, "</u>", 4) == 0 || my_strncasecmp(p, "</ins>", 6) == 0) {
-                text_out[out_idx++] = '\x16';
-            }
-
-            // Headings <h1 .. <h6
-            if (p[0] == '<' && (p[1] == 'h' || p[1] == 'H') && (p[2] >= '1' && p[2] <= '6')) {
-                if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
-                    text_out[out_idx++] = '\n';
-                    text_out[out_idx++] = '\n';
-                }
-                text_out[out_idx++] = '\x02'; // Enable Bold for heading
-            } else if (p[0] == '<' && p[1] == '/' && (p[2] == 'h' || p[2] == 'H') && (p[3] >= '1' && p[3] <= '6')) {
-                text_out[out_idx++] = '\x03'; // Disable Bold after heading
-            }
-
-            // Ultra-fast local tag CSS scanning (scans ONLY bytes inside tag up to '>')
-            if (tag_len > 0 && tag_len < 256) {
-                char tag_buf[256];
-                memcpy(tag_buf, p, tag_len);
-                tag_buf[tag_len] = '\0';
-                for (size_t k = 0; k < tag_len; k++) {
-                    tag_buf[k] = tolower((unsigned char)tag_buf[k]);
-                }
-
-                if (strstr(tag_buf, "font-style: italic") || strstr(tag_buf, "font-style:italic") ||
-                    strstr(tag_buf, "font-style: oblique") || strstr(tag_buf, "font-style:oblique")) {
-                    text_out[out_idx++] = '\x0E';
-                }
-                if (strstr(tag_buf, "font-weight: bold") || strstr(tag_buf, "font-weight:bold") ||
-                    strstr(tag_buf, "font-weight: 700") || strstr(tag_buf, "font-weight:700")) {
-                    text_out[out_idx++] = '\x02';
-                }
-                if (strstr(tag_buf, "text-decoration: underline") || strstr(tag_buf, "text-decoration:underline")) {
-                    text_out[out_idx++] = '\x15';
-                }
-                if (strstr(tag_buf, "text-align: center") || strstr(tag_buf, "text-align:center") ||
-                    strstr(tag_buf, "align=\"center\"")) {
-                    text_out[out_idx++] = '\x1C';
-                }
-            }
-
-            // Paragraph & Line break formatting
-            if (my_strncasecmp(p, "<p>", 3) == 0 || my_strncasecmp(p, "<p ", 3) == 0) {
-                if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
-                    text_out[out_idx++] = '\n';
-                    text_out[out_idx++] = '\n';
-                }
-            } else if (my_strncasecmp(p, "<br", 3) == 0 || my_strncasecmp(p, "</div>", 6) == 0) {
-                if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
-                    text_out[out_idx++] = '\n';
-                }
-            } else if (my_strncasecmp(p, "<li>", 4) == 0 || my_strncasecmp(p, "<li ", 4) == 0) {
-                if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
-                    text_out[out_idx++] = '\n';
-                }
-                text_out[out_idx++] = '-';
-                text_out[out_idx++] = ' ';
-            }
-
-            p++;
-            continue;
-        }
-
-        if (*p == '>') {
-            in_tag = false;
-            p++;
-            continue;
-        }
-
-        if (in_tag) {
-            p++;
-            continue;
-        }
-
-        // HTML Entity Decoding
-        if (*p == '&') {
-            if (my_strncasecmp(p, "&quot;", 6) == 0) { text_out[out_idx++] = '"'; p += 6; continue; }
-            if (my_strncasecmp(p, "&apos;", 6) == 0) { text_out[out_idx++] = '\''; p += 6; continue; }
-            if (my_strncasecmp(p, "&lsquo;", 7) == 0) { text_out[out_idx++] = '\''; p += 7; continue; }
-            if (my_strncasecmp(p, "&rsquo;", 7) == 0) { text_out[out_idx++] = '\''; p += 7; continue; }
-            if (my_strncasecmp(p, "&ldquo;", 7) == 0) { text_out[out_idx++] = '"'; p += 7; continue; }
-            if (my_strncasecmp(p, "&rdquo;", 7) == 0) { text_out[out_idx++] = '"'; p += 7; continue; }
-            if (my_strncasecmp(p, "&mdash;", 7) == 0) { text_out[out_idx++] = '-'; p += 7; continue; }
-            if (my_strncasecmp(p, "&ndash;", 7) == 0) { text_out[out_idx++] = '-'; p += 7; continue; }
-            if (my_strncasecmp(p, "&hellip;", 8) == 0) { text_out[out_idx++] = '.'; p += 8; continue; }
-            if (my_strncasecmp(p, "&amp;", 5) == 0) { text_out[out_idx++] = '&'; p += 5; continue; }
-            if (my_strncasecmp(p, "&lt;", 4) == 0) { text_out[out_idx++] = '<'; p += 4; continue; }
-            if (my_strncasecmp(p, "&gt;", 4) == 0) { text_out[out_idx++] = '>'; p += 4; continue; }
-            if (my_strncasecmp(p, "&nbsp;", 6) == 0) { text_out[out_idx++] = ' '; p += 6; continue; }
-
-            // Numeric entities &#160; &#x201C;
-            if (p[1] == '#') {
-                const char *end_semi = strchr(p, ';');
-                if (end_semi && (end_semi - p) < 10) {
-                    uint32_t val = 0;
-                    if (p[2] == 'x' || p[2] == 'X') {
-                        val = strtoul(p + 3, NULL, 16);
-                    } else {
-                        val = strtoul(p + 2, NULL, 10);
-                    }
-                    if (val == 0x201C || val == 0x201D) text_out[out_idx++] = '"';
-                    else if (val == 0x2018 || val == 0x2019) text_out[out_idx++] = '\'';
-                    else if (val == 0x2014 || val == 0x2013) text_out[out_idx++] = '-';
-                    else if (val == 160) text_out[out_idx++] = ' ';
-                    else if (val < 128) text_out[out_idx++] = (char)val;
-                    else text_out[out_idx++] = '?';
-
-                    p = end_semi + 1;
-                    continue;
-                }
-            }
-        }
-
-        if (*p == '\n' || *p == '\r') {
-            if (out_idx > 0 && text_out[out_idx - 1] != '\n') {
-                text_out[out_idx++] = '\n';
-            }
-            p++;
-            continue;
-        }
-
-        if (*p == ' ' || *p == '\t') {
-            if (!last_was_space) {
-                text_out[out_idx++] = ' ';
-                last_was_space = true;
-            }
-            p++;
-            continue;
-        }
-
-        last_was_space = false;
-        text_out[out_idx++] = *p++;
-    }
-
-    text_out[out_idx] = '\0';
-
-    // Post-process: collapse 3+ consecutive newlines to at most 2 (allowing 1 intentional blank line between paragraphs)
-    char *r = text_out;
-    char *w = text_out;
-    int nl_cnt = 0;
-    while (*r) {
-        if (*r == '\n') {
-            nl_cnt++;
-            if (nl_cnt <= 2) {
-                *w++ = '\n';
-            }
-        } else {
-            nl_cnt = 0;
-            *w++ = *r;
-        }
-        r++;
-    }
-    *w = '\0';
 }
 
 static int natural_chapter_cmp(const void *a, const void *b) {
@@ -346,121 +155,136 @@ static void parse_toc_ncx_titles(const char *ncx_buf, EpubBook *book)
     }
 }
 
-typedef struct {
-    char id[64];
-    char href[128];
-} ManifestItem;
+// Copies the value of attribute `attr` from the tag spanning [tag, tag_end)
+static bool tag_attr(const char *tag, const char *tag_end, const char *attr, char *out, size_t out_size)
+{
+    size_t alen = strlen(attr);
+    for (const char *p = tag; p + alen + 2 < tag_end; p++) {
+        // Attribute names follow whitespace, which rules out e.g. "idref" matching "id"
+        if (!isspace((unsigned char)p[0])) continue;
+        if (my_strncasecmp(p + 1, attr, alen) != 0 || p[1 + alen] != '=') continue;
 
+        const char *v = p + 2 + alen;
+        char quote = *v;
+        if (quote == '"' || quote == '\'') {
+            v++;
+        } else {
+            quote = 0;
+        }
+        const char *e = v;
+        while (e < tag_end && (quote ? *e != quote : (!isspace((unsigned char)*e) && *e != '/'))) e++;
+
+        size_t n = (size_t)(e - v);
+        if (n >= out_size) n = out_size - 1;
+        memcpy(out, v, n);
+        out[n] = '\0';
+        return true;
+    }
+    return false;
+}
+
+static bool manifest_href_for_id(const char *m_start, const char *m_end, const char *id,
+                                 char *href_out, size_t href_max)
+{
+    char item_id[64];
+    const char *p = m_start;
+    while (p < m_end) {
+        const char *item = my_strcasestr(p, "<item");
+        if (!item || item >= m_end) break;
+        const char *tag_end = strchr(item, '>');
+        if (!tag_end || tag_end > m_end) break;
+
+        if (isspace((unsigned char)item[5]) &&
+            tag_attr(item, tag_end, "id", item_id, sizeof(item_id)) && strcmp(item_id, id) == 0) {
+            return tag_attr(item, tag_end, "href", href_out, href_max);
+        }
+        p = tag_end + 1;
+    }
+    return false;
+}
+
+static const char *path_basename(const char *path)
+{
+    const char *base = strrchr(path, '/');
+    if (!base) base = strrchr(path, '\\');
+    return base ? (base + 1) : path;
+}
+
+// Reorders book->chapters to follow the OPF <spine>, dropping entries not in the spine.
+// Works in place so it needs no heap (the old version needed ~52 KB from a 32 KB heap).
 static bool parse_opf_spine_order(const char *opf_buf, EpubBook *book)
 {
     if (!opf_buf || !book || book->chapter_count == 0) return false;
 
-    ManifestItem *manifest = k_malloc(sizeof(ManifestItem) * 128);
-    if (!manifest) return false;
-    int manifest_count = 0;
-
     const char *m_start = my_strcasestr(opf_buf, "<manifest");
     const char *m_end = m_start ? my_strcasestr(m_start, "</manifest>") : NULL;
-    if (m_start && m_end) {
-        const char *p = m_start;
-        while (p < m_end && manifest_count < 128) {
-            const char *item = my_strcasestr(p, "<item ");
-            if (!item || item >= m_end) break;
-
-            const char *id_attr = my_strcasestr(item, "id=");
-            const char *href_attr = my_strcasestr(item, "href=");
-
-            if (id_attr && href_attr && id_attr < strchr(item, '>') && href_attr < strchr(item, '>')) {
-                id_attr += 3; if (*id_attr == '"' || *id_attr == '\'') id_attr++;
-                const char *id_end = strpbrk(id_attr, "\"'>");
-                
-                href_attr += 5; if (*href_attr == '"' || *href_attr == '\'') href_attr++;
-                const char *href_end = strpbrk(href_attr, "\"'>");
-
-                if (id_end && href_end && id_end > id_attr && href_end > href_attr) {
-                    ManifestItem *mi = &manifest[manifest_count++];
-                    size_t id_len = id_end - id_attr;
-                    if (id_len >= sizeof(mi->id)) id_len = sizeof(mi->id) - 1;
-                    memcpy(mi->id, id_attr, id_len); mi->id[id_len] = '\0';
-
-                    size_t href_len = href_end - href_attr;
-                    if (href_len >= sizeof(mi->href)) href_len = sizeof(mi->href) - 1;
-                    memcpy(mi->href, href_attr, href_len); mi->href[href_len] = '\0';
-
-                    char *hash = strchr(mi->href, '#');
-                    if (hash) *hash = '\0';
-                }
-            }
-            p = item + 6;
-        }
-    }
-
-    bool success = false;
     const char *s_start = my_strcasestr(opf_buf, "<spine");
     const char *s_end = s_start ? my_strcasestr(s_start, "</spine>") : NULL;
-    if (s_start && s_end) {
-        EpubChapterInfo *ordered_chapters = k_malloc(sizeof(EpubChapterInfo) * MAX_EPUB_CHAPTERS);
-        if (ordered_chapters) {
-            int ordered_count = 0;
-            const char *p = s_start;
-            while (p < s_end && ordered_count < MAX_EPUB_CHAPTERS) {
-                const char *ref = my_strcasestr(p, "<itemref ");
-                if (!ref || ref >= s_end) break;
+    if (!m_start || !m_end || !s_start || !s_end) return false;
 
-                const char *idref_attr = my_strcasestr(ref, "idref=");
-                if (idref_attr && idref_attr < strchr(ref, '>')) {
-                    idref_attr += 6; if (*idref_attr == '"' || *idref_attr == '\'') idref_attr++;
-                    const char *idref_end = strpbrk(idref_attr, "\"'>");
-                    if (idref_end && idref_end > idref_attr) {
-                        char target_id[64] = {0};
-                        size_t tlen = idref_end - idref_attr;
-                        if (tlen >= sizeof(target_id)) tlen = sizeof(target_id) - 1;
-                        memcpy(target_id, idref_attr, tlen); target_id[tlen] = '\0';
+    int16_t order[MAX_EPUB_CHAPTERS];
+    bool used[MAX_EPUB_CHAPTERS] = {0};
+    int ordered_count = 0;
 
-                        const char *target_href = NULL;
-                        for (int m = 0; m < manifest_count; m++) {
-                            if (strcmp(manifest[m].id, target_id) == 0) {
-                                target_href = manifest[m].href;
-                                break;
-                            }
-                        }
+    const char *p = s_start;
+    while (p < s_end && ordered_count < book->chapter_count) {
+        const char *ref = my_strcasestr(p, "<itemref");
+        if (!ref || ref >= s_end) break;
+        const char *ref_end = strchr(ref, '>');
+        if (!ref_end) break;
+        p = ref_end + 1;
 
-                        if (target_href) {
-                            const char *mbase = strrchr(target_href, '/');
-                            if (!mbase) mbase = strrchr(target_href, '\\');
-                            mbase = mbase ? (mbase + 1) : target_href;
+        char idref[64];
+        char href[128];
+        if (!tag_attr(ref, ref_end, "idref", idref, sizeof(idref)) ||
+            !manifest_href_for_id(m_start, m_end, idref, href, sizeof(href))) {
+            continue;
+        }
 
-                            for (int c = 0; c < book->chapter_count; c++) {
-                                const char *cbase = strrchr(book->chapters[c].chapter_path, '/');
-                                if (!cbase) cbase = strrchr(book->chapters[c].chapter_path, '\\');
-                                cbase = cbase ? (cbase + 1) : book->chapters[c].chapter_path;
+        char *hash = strchr(href, '#');
+        if (hash) *hash = '\0';
+        const char *mbase = path_basename(href);
 
-                                if (my_strcasecmp(cbase, mbase) == 0) {
-                                    ordered_chapters[ordered_count++] = book->chapters[c];
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                p = ref + 9;
+        for (int c = 0; c < book->chapter_count; c++) {
+            if (!used[c] && my_strcasecmp(path_basename(book->chapters[c].chapter_path), mbase) == 0) {
+                used[c] = true;
+                order[ordered_count++] = (int16_t)c;
+                break;
             }
-
-            if (ordered_count > 0) {
-                LOG_INF("[EPUB Spine] Re-ordered %d chapters according to OPF spine", ordered_count);
-                memcpy(book->chapters, ordered_chapters, sizeof(EpubChapterInfo) * ordered_count);
-                book->chapter_count = ordered_count;
-                success = true;
-            }
-            k_free(ordered_chapters);
         }
     }
-    k_free(manifest);
-    return success;
+
+    if (ordered_count == 0) return false;
+
+    // Apply the permutation with swaps, tracking where each original chapter currently sits
+    int16_t slot_of[MAX_EPUB_CHAPTERS];
+    int16_t at_slot[MAX_EPUB_CHAPTERS];
+    for (int i = 0; i < book->chapter_count; i++) {
+        slot_of[i] = (int16_t)i;
+        at_slot[i] = (int16_t)i;
+    }
+    for (int i = 0; i < ordered_count; i++) {
+        int16_t src = slot_of[order[i]];
+        if (src == i) continue;
+
+        EpubChapterInfo tmp = book->chapters[i];
+        book->chapters[i] = book->chapters[src];
+        book->chapters[src] = tmp;
+
+        int16_t displaced = at_slot[i];
+        at_slot[src] = displaced;
+        slot_of[displaced] = src;
+        at_slot[i] = order[i];
+        slot_of[order[i]] = (int16_t)i;
+    }
+
+    LOG_INF("[EPUB Spine] Re-ordered %d chapters according to OPF spine", ordered_count);
+    book->chapter_count = ordered_count;
+    return true;
 }
 
 #define EPUB_CACHE_MAGIC   0x45505542u  /* "EPUB" */
-#define EPUB_CACHE_VERSION 7u
+#define EPUB_CACHE_VERSION 8u  /* v8: offsets point into the converted .txt */
 
 typedef struct {
     uint32_t magic;
@@ -473,24 +297,17 @@ typedef struct {
     char author[64];
 } EpubCacheHeader;
 
-static void build_cache_path(const char *epub_path, char *cache_path_out, size_t max_len)
+// Sidecar files live in /SD:/cache named after the book, e.g. "Book.epub.idx"
+static void build_sidecar_path(const char *epub_path, const char *ext, char *out, size_t max_len)
 {
-    const char *base = strrchr(epub_path, '/');
-    if (!base) base = strrchr(epub_path, '\\');
-    base = base ? (base + 1) : epub_path;
-
+    const char *base = path_basename(epub_path);
     int max_base = (max_len > 16) ? (int)(max_len - 16) : 0;
-    snprintf(cache_path_out, max_len, "/SD:/cache/%.*s.idx", max_base, base);
+    snprintf(out, max_len, "/SD:/cache/%.*s.%s", max_base, base, ext);
 }
 
-static void build_cover_cache_path(const char *epub_path, char *cov_path_out, size_t max_len)
+void epub_build_text_path(const char *epub_path, char *out, size_t max_len)
 {
-    const char *base = strrchr(epub_path, '/');
-    if (!base) base = strrchr(epub_path, '\\');
-    base = base ? (base + 1) : epub_path;
-
-    int max_base = (max_len > 16) ? (int)(max_len - 16) : 0;
-    snprintf(cov_path_out, max_len, "/SD:/cache/%.*s.cov", max_base, base);
+    build_sidecar_path(epub_path, "txt", out, max_len);
 }
 
 static bool load_sidecar_cache(const char *cache_path, EpubBook *book)
@@ -561,6 +378,113 @@ static void save_sidecar_cache(const char *cache_path, const EpubBook *book)
     LOG_INF("Saved index cache: %s", cache_path);
 }
 
+typedef struct {
+    struct fs_file_t *src;
+    uint32_t remaining;  // compressed bytes left in the current ZIP entry
+} EntryReader;
+
+static int entry_read(void *ctx, uint8_t *buf, size_t len)
+{
+    EntryReader *r = ctx;
+    if (r->remaining == 0) return 0;
+    if (len > r->remaining) len = r->remaining;
+    ssize_t n = fs_read(r->src, buf, len);
+    if (n > 0) r->remaining -= (uint32_t)n;
+    return (int)n;
+}
+
+static int html_sink(void *ctx, const uint8_t *buf, size_t len)
+{
+    ARG_UNUSED(ctx);
+    html_text_feed(&s_html, buf, len);
+    return s_html.error;
+}
+
+static int text_file_sink(void *ctx, const char *buf, size_t len)
+{
+    return fs_write((struct fs_file_t *)ctx, buf, len) == (ssize_t)len ? 0 : -EIO;
+}
+
+// Streams every chapter through inflate + HTML stripping into one plain-text file
+// and records each chapter's byte range in that file.
+static bool convert_book_text(const char *epub_path, EpubBook *book)
+{
+    char text_path[256];
+    epub_build_text_path(epub_path, text_path, sizeof(text_path));
+
+    struct fs_file_t src, dst;
+    fs_file_t_init(&src);
+    fs_file_t_init(&dst);
+
+    int res = fs_open(&src, epub_path, FS_O_READ);
+    if (res != 0) {
+        LOG_ERR("Failed to open EPUB file: %s (err %d)", epub_path, res);
+        return false;
+    }
+    struct fs_dirent cache_dir_stat;
+    if (fs_stat("/SD:/cache", &cache_dir_stat) != 0) {
+        fs_mkdir("/SD:/cache");
+    }
+    res = fs_open(&dst, text_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+    if (res != 0) {
+        LOG_ERR("Failed to create text cache: %s (err %d)", text_path, res);
+        fs_close(&src);
+        return false;
+    }
+
+    uint32_t start_ms = k_uptime_get_32();
+    html_text_init(&s_html, text_file_sink, &dst);
+    if (s_progress_cb) s_progress_cb(0);
+
+    for (int i = 0; i < book->chapter_count && !s_html.error; i++) {
+        EpubChapterInfo *ch = &book->chapters[i];
+        html_text_document_break(&s_html);
+        ch->cum_offset = html_text_total(&s_html);
+
+        EntryReader reader = { .src = &src, .remaining = ch->compressed_size };
+        int err = fs_seek(&src, ch->payload_offset, FS_SEEK_SET);
+        if (err == 0 && ch->compression_method == 8) {
+            err = inflate_stream(s_work.text.window, s_work.text.in, sizeof(s_work.text.in),
+                                 entry_read, html_sink, &reader);
+        } else if (err == 0 && ch->compression_method == 0) {
+            int n;
+            while ((n = entry_read(&reader, s_work.text.in, sizeof(s_work.text.in))) > 0) {
+                html_text_feed(&s_html, s_work.text.in, (size_t)n);
+            }
+            err = n;
+        } else if (err == 0) {
+            err = -ENOTSUP;
+        }
+        if (err != 0) {
+            // Whatever decoded before the error is kept
+            LOG_WRN("Chapter %s: decode error %d", ch->chapter_path, err);
+        }
+
+        if (s_progress_cb) s_progress_cb(((i + 1) * 100) / book->chapter_count);
+    }
+
+    int write_err = html_text_finish(&s_html);
+    uint32_t total = html_text_total(&s_html);
+    fs_close(&dst);
+    fs_close(&src);
+
+    if (write_err) {
+        LOG_ERR("Failed writing text cache: %s", text_path);
+        fs_unlink(text_path);
+        return false;
+    }
+
+    for (int i = 0; i < book->chapter_count; i++) {
+        uint32_t end = (i + 1 < book->chapter_count) ? book->chapters[i + 1].cum_offset : total;
+        book->chapters[i].text_length = end - book->chapters[i].cum_offset;
+    }
+    book->total_book_text_len = total;
+
+    LOG_INF("Converted %s -> %s (%u bytes, %u ms)", epub_path, text_path, total,
+            k_uptime_get_32() - start_ms);
+    return true;
+}
+
 bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
     if (!epub_path || !book) return false;
 
@@ -570,10 +494,19 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
     snprintf(book->book_path, sizeof(book->book_path), "%s", epub_path);
 
     char cache_path[256];
-    build_cache_path(epub_path, cache_path, sizeof(cache_path));
+    build_sidecar_path(epub_path, "idx", cache_path, sizeof(cache_path));
 
     if (load_sidecar_cache(cache_path, book)) {
-        return true;
+        // The index is written after the text, but check the text survived intact
+        char text_path[256];
+        struct fs_dirent text_stat;
+        epub_build_text_path(epub_path, text_path, sizeof(text_path));
+        if (fs_stat(text_path, &text_stat) == 0 && text_stat.size == book->total_book_text_len) {
+            return true;
+        }
+        LOG_WRN("Text cache missing or incomplete, rebuilding: %s", text_path);
+        memset(book, 0, sizeof(EpubBook));
+        snprintf(book->book_path, sizeof(book->book_path), "%s", epub_path);
     }
 
     struct fs_file_t file;
@@ -807,17 +740,8 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
         }
     }
 
-    uint32_t current_cum = 0;
-    static char s_temp_txt[8192];
     int main_chap_counter = 1;
     for (int i = 0; i < book->chapter_count; i++) {
-        book->chapters[i].cum_offset = current_cum;
-        if (epub_read_chapter_text(epub_path, &book->chapters[i], s_temp_txt, sizeof(s_temp_txt))) {
-            book->chapters[i].text_length = (uint32_t)strlen(s_temp_txt);
-        } else {
-            book->chapters[i].text_length = 500;
-        }
-        current_cum += book->chapters[i].text_length;
         if (book->chapters[i].title[0] == '\0') {
             char lower_chap[128];
             for (int k = 0; book->chapters[i].chapter_path[k] && k < 127; k++) {
@@ -846,104 +770,21 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
                 snprintf(book->chapters[i].title, sizeof(book->chapters[i].title), "Chapter %d", main_chap_counter++);
             }
         }
+    }
+
+    if (book->chapter_count == 0 || !convert_book_text(epub_path, book)) {
+        return false;
+    }
+
+    for (int i = 0; i < book->chapter_count; i++) {
         LOG_INF("Ordered Chapter [%d]: %s ('%s', cum_offset: %u, text_len: %u)",
                 i, book->chapters[i].chapter_path, book->chapters[i].title, book->chapters[i].cum_offset, book->chapters[i].text_length);
     }
-    book->total_book_text_len = current_cum;
 
     LOG_INF("=== EPUB SCAN COMPLETE: Found %d sorted chapters, total text len: %u ===",
             book->chapter_count, book->total_book_text_len);
 
-    if (book->chapter_count > 0) {
-        save_sidecar_cache(cache_path, book);
-    }
-    return (book->chapter_count > 0);
-}
-
-bool epub_read_chapter_text(const char *epub_path, const EpubChapterInfo *chap_info, char *text_out, uint32_t text_max_len) {
-    if (!epub_path || !chap_info || !text_out || text_max_len == 0) return false;
-
-    struct fs_file_t file;
-    fs_file_t_init(&file);
-
-    int res = fs_open(&file, epub_path, FS_O_READ);
-    if (res != 0) {
-        LOG_ERR("Failed to open EPUB file: %s (err %d)", epub_path, res);
-        return false;
-    }
-
-    fs_seek(&file, chap_info->payload_offset, FS_SEEK_SET);
-
-    uint32_t to_read = chap_info->compressed_size;
-    if (to_read > sizeof(s_comp_buf)) to_read = sizeof(s_comp_buf);
-
-    ssize_t read_bytes = fs_read(&file, s_comp_buf, to_read);
-    fs_close(&file);
-
-    if (read_bytes <= 0) return false;
-
-    if (chap_info->compression_method == 0) { // Store (uncompressed)
-        uint32_t copy_len = (read_bytes < sizeof(s_raw_html_buf) - 1) ? read_bytes : (sizeof(s_raw_html_buf) - 1);
-        memcpy(s_raw_html_buf, s_comp_buf, copy_len);
-        s_raw_html_buf[copy_len] = '\0';
-    } else if (chap_info->compression_method == 8) { // Deflate
-        unsigned long dest_len = sizeof(s_raw_html_buf) - 1;
-        unsigned long src_len = read_bytes;
-
-        int ret = puff((unsigned char*)s_raw_html_buf, &dest_len, s_comp_buf, &src_len);
-        if (ret != 0 && dest_len == 0) return false;
-        s_raw_html_buf[dest_len] = '\0';
-    } else {
-        return false;
-    }
-
-    strip_html_and_entities(s_raw_html_buf, text_out, text_max_len);
-    return true;
-}
-
-bool epub_read_book_offset(EpubBook *book, uint32_t global_offset, char *page_buf, size_t buf_size, uint32_t *bytes_read) {
-    *bytes_read = 0;
-    if (!book || book->chapter_count == 0 || buf_size == 0) return false;
-
-    if (global_offset >= book->total_book_text_len) {
-        global_offset = book->total_book_text_len > 0 ? (book->total_book_text_len - 1) : 0;
-    }
-
-    int chap_idx = 0;
-    for (int i = 0; i < book->chapter_count; i++) {
-        uint32_t chap_start = book->chapters[i].cum_offset;
-        uint32_t chap_end = chap_start + book->chapters[i].text_length;
-        if (global_offset >= chap_start && global_offset < chap_end) {
-            chap_idx = i;
-            break;
-        }
-        if (i == book->chapter_count - 1) {
-            chap_idx = i;
-        }
-    }
-
-    uint32_t local_offset = global_offset - book->chapters[chap_idx].cum_offset;
-
-    static char s_chapter_text[8192];
-    if (!epub_read_chapter_text(book->book_path, &book->chapters[chap_idx], s_chapter_text, sizeof(s_chapter_text))) {
-        LOG_ERR("Failed to read EPUB chapter %d", chap_idx);
-        return false;
-    }
-
-    size_t chap_text_len = strlen(s_chapter_text);
-    if (local_offset >= chap_text_len) {
-        local_offset = 0;
-    }
-
-    size_t avail = chap_text_len - local_offset;
-    size_t copy_bytes = (avail < buf_size - 1) ? avail : (buf_size - 1);
-
-    memcpy(page_buf, s_chapter_text + local_offset, copy_bytes);
-    page_buf[copy_bytes] = '\0';
-    *bytes_read = (uint32_t)copy_bytes;
-
-    LOG_INF("[EPUB Offset Reader] Global offset %u -> Chap [%d] (%s), local_offset %u, read %u bytes",
-            global_offset, chap_idx, book->chapters[chap_idx].chapter_path, local_offset, (uint32_t)copy_bytes);
+    save_sidecar_cache(cache_path, book);
     return true;
 }
 
@@ -1001,19 +842,12 @@ static bool decode_jpeg_dc_cover(const uint8_t *jpeg_buf, size_t jpeg_len, uint8
     return true;
 }
 
-bool epub_extract_cover_image(const char *epub_path, uint8_t *gray_out, int target_w, int target_h) {
-    if (!epub_path || !gray_out || target_w <= 0 || target_h <= 0) return false;
+bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int target_w, int target_h) {
+    if (!book || !gray_out || target_w <= 0 || target_h <= 0) return false;
 
-    char full_epub_path[256];
-    if (strncmp(epub_path, "/SD:", 4) == 0) {
-        snprintf(full_epub_path, sizeof(full_epub_path), "%s", epub_path);
-    } else {
-        snprintf(full_epub_path, sizeof(full_epub_path), "/SD:/BOOKS/%s", epub_path);
-    }
-
-    /* 2. Fast Path: Check if pre-rendered 145x210 cover bitmap cache (.cov) exists on SD card */
+    /* 1. Fast Path: Check if pre-rendered 145x210 cover bitmap cache (.cov) exists on SD card */
     char cov_path[256];
-    build_cover_cache_path(full_epub_path, cov_path, sizeof(cov_path));
+    build_sidecar_path(book->book_path, "cov", cov_path, sizeof(cov_path));
 
     struct fs_dirent cov_stat;
     if (fs_stat(cov_path, &cov_stat) == 0) {
@@ -1030,47 +864,44 @@ bool epub_extract_cover_image(const char *epub_path, uint8_t *gray_out, int targ
         }
     }
 
-    /* 3. Slow Path: Read EPUB cover image payload from SD card */
-    EpubBook *tmp_book = k_malloc(sizeof(EpubBook));
-    if (!tmp_book) return false;
-
-    if (!epub_scan_chapters(full_epub_path, tmp_book) || !tmp_book->cover.found) {
-        LOG_WRN("No cover image entry found in EPUB: %s", full_epub_path);
-        k_free(tmp_book);
+    /* 2. Slow Path: Read EPUB cover image payload from SD card */
+    if (!book->cover.found) {
+        LOG_WRN("No cover image entry found in EPUB: %s", book->book_path);
         return false;
     }
 
     struct fs_file_t file;
     fs_file_t_init(&file);
-    if (fs_open(&file, full_epub_path, FS_O_READ) != 0) {
-        k_free(tmp_book);
+    if (fs_open(&file, book->book_path, FS_O_READ) != 0) {
         return false;
     }
 
-    uint32_t comp_size = tmp_book->cover.compressed_size;
-    uint32_t payload_offset = tmp_book->cover.payload_offset;
-    uint16_t comp_method = tmp_book->cover.compression_method;
-    k_free(tmp_book);
+    uint32_t comp_size = book->cover.compressed_size;
+    uint32_t payload_offset = book->cover.payload_offset;
+    uint16_t comp_method = book->cover.compression_method;
+
+    uint8_t *comp_buf = s_work.cover.comp;
+    uint8_t *inflated_buf = s_work.cover.raw;
 
     fs_seek(&file, payload_offset, FS_SEEK_SET);
-    size_t comp_read = (comp_size < sizeof(s_comp_buf)) ? comp_size : sizeof(s_comp_buf);
-    fs_read(&file, s_comp_buf, comp_read);
+    size_t comp_read = (comp_size < sizeof(s_work.cover.comp)) ? comp_size : sizeof(s_work.cover.comp);
+    fs_read(&file, comp_buf, comp_read);
     fs_close(&file);
 
-    uint8_t *raw_buf = s_comp_buf;
+    uint8_t *raw_buf = comp_buf;
     size_t raw_len = comp_read;
 
     if (comp_method == 8) {
-        unsigned long dest_len = sizeof(s_raw_html_buf);
+        unsigned long dest_len = sizeof(s_work.cover.raw);
         unsigned long src_len = comp_read;
-        int p_res = puff(s_raw_html_buf, &dest_len, s_comp_buf, &src_len);
+        int p_res = puff(inflated_buf, &dest_len, comp_buf, &src_len);
         if (p_res == 0 && dest_len > 0) {
-            raw_buf = s_raw_html_buf;
+            raw_buf = inflated_buf;
             raw_len = dest_len;
         }
     }
 
-    /* 4. Decode JPEG image stream into continuous 0-255 grayscale cover array */
+    /* 3. Decode JPEG image stream into continuous 0-255 grayscale cover array */
     if (!decode_jpeg_dc_cover(raw_buf, raw_len, gray_out, target_w, target_h)) {
         for (int y = 0; y < target_h; y++) {
             for (int x = 0; x < target_w; x++) {
@@ -1081,7 +912,7 @@ bool epub_extract_cover_image(const char *epub_path, uint8_t *gray_out, int targ
         }
     }
 
-    /* 5. Save generated 145x210 cover bitmap to SD sidecar cache (.cov) for instant future loads */
+    /* 4. Save generated 145x210 cover bitmap to SD sidecar cache (.cov) for instant future loads */
     struct fs_dirent cache_dir_stat;
     if (fs_stat("/SD:/cache", &cache_dir_stat) != 0) {
         fs_mkdir("/SD:/cache");

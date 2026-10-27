@@ -26,6 +26,14 @@ config GDEY037T03_CUSTOM_PULSE_INTERVAL
 	help
 	  Pulse timing duration (T1..T4) when Custom profile is active.
 
+config GDEY037T03_KEEP_POWERED
+	bool "Keep the panel powered between partial refreshes (experimental)"
+	help
+	  Skip the power-off and soft reset after each refresh and keep the
+	  partial waveform loaded, powering off after a short idle period.
+	  Faster page turns, but caused page images to pile up (old pixels
+	  not erased) on GDEY037T03 hardware, so it is off by default.
+
 config GDEY037T03_CUSTOM_PULSE_COUNT
 	int "Custom pulse repetition count"
 	default 3

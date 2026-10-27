@@ -47,28 +47,43 @@ int display_init(void) {
     }
     display_clear_buffer();
 
-    // Auto-detect & load custom font from SD card if present
+    // Auto-detect & load custom font from SD card if present; it becomes the default reader font
     struct fs_dirent fnt_stat;
+    bool sd_font = false;
     if (fs_stat("/SD:/fonts/Bookerly.fnt", &fnt_stat) == 0) {
-        font_sd_load("/SD:/fonts/Bookerly.fnt");
+        sd_font = font_sd_load("/SD:/fonts/Bookerly.fnt");
     } else if (fs_stat("/SD:/fonts/Arial.fnt", &fnt_stat) == 0) {
-        font_sd_load("/SD:/fonts/Arial.fnt");
+        sd_font = font_sd_load("/SD:/fonts/Arial.fnt");
     }
-
-    // Load persisted waveform refresh settings from SD storage
-    int saved_prof = 0;
-    uint8_t saved_interval = 2;
-    uint8_t saved_count = 3;
-    if (storage_read_refresh_settings(&saved_prof, &saved_interval, &saved_count)) {
-        struct gdey037t03_refresh_config cfg = {
-            .profile = (enum gdey037t03_refresh_profile)saved_prof,
-            .pulse_interval = saved_interval,
-            .pulse_count = saved_count,
-        };
-        gdey037t03_set_refresh_config(epd_dev, &cfg);
+    if (sd_font) {
+        g_font_type = FONT_SD;
     }
 
     return 0;
+}
+
+void display_set_refresh_config(enum gdey037t03_refresh_profile profile, uint8_t interval, uint8_t count) {
+    if (!device_is_ready(epd_dev)) return;
+    struct gdey037t03_refresh_config cfg = {
+        .profile = profile,
+        .pulse_interval = interval,
+        .pulse_count = count,
+    };
+    gdey037t03_set_refresh_config(epd_dev, &cfg);
+}
+
+void display_get_refresh_config(enum gdey037t03_refresh_profile *profile, uint8_t *interval, uint8_t *count) {
+    struct gdey037t03_refresh_config cfg = {
+        .profile = GDEY037T03_PROFILE_NORMAL,
+        .pulse_interval = 2,
+        .pulse_count = 3,
+    };
+    if (device_is_ready(epd_dev)) {
+        gdey037t03_get_refresh_config(epd_dev, &cfg);
+    }
+    *profile = cfg.profile;
+    *interval = cfg.pulse_interval;
+    *count = cfg.pulse_count;
 }
 
 void display_power_on(void) {
@@ -93,7 +108,15 @@ bool display_is_flipped(void) {
 
 FontType display_get_font(void) { return g_font_type; }
 void display_set_font(FontType font) { g_font_type = font; }
-void display_cycle_font(void) { g_font_type = (g_font_type == FONT_SERIF) ? FONT_SANS : FONT_SERIF; }
+void display_cycle_font(void) {
+    if (g_font_type == FONT_SERIF) {
+        g_font_type = FONT_SANS;
+    } else if (g_font_type == FONT_SANS && font_sd_is_active()) {
+        g_font_type = FONT_SD;
+    } else {
+        g_font_type = FONT_SERIF;
+    }
+}
 
 FontSize display_get_size(void) { return g_font_size; }
 void display_set_size(FontSize size) { g_font_size = size; }
@@ -121,7 +144,6 @@ void display_set_refresh_profile(enum gdey037t03_refresh_profile profile) {
         gdey037t03_get_refresh_config(epd_dev, &cfg);
         cfg.profile = profile;
         gdey037t03_set_refresh_config(epd_dev, &cfg);
-        storage_write_refresh_settings((int)cfg.profile, cfg.pulse_interval, cfg.pulse_count);
     }
 }
 
@@ -148,7 +170,6 @@ void display_set_pulse_interval(uint8_t interval) {
         gdey037t03_get_refresh_config(epd_dev, &cfg);
         cfg.pulse_interval = interval;
         gdey037t03_set_refresh_config(epd_dev, &cfg);
-        storage_write_refresh_settings((int)cfg.profile, cfg.pulse_interval, cfg.pulse_count);
     }
 }
 
@@ -191,7 +212,6 @@ void display_set_pulse_count(uint8_t count) {
         gdey037t03_get_refresh_config(epd_dev, &cfg);
         cfg.pulse_count = count;
         gdey037t03_set_refresh_config(epd_dev, &cfg);
-        storage_write_refresh_settings((int)cfg.profile, cfg.pulse_interval, cfg.pulse_count);
     }
 }
 
@@ -211,7 +231,11 @@ const char *display_get_refresh_profile_name(void) {
     }
 }
 
+// NULL means the SD font (see font_get_glyph_styled)
 static const GFXfont* get_active_reader_font(void) {
+    if (g_font_type == FONT_SD && font_sd_is_active()) {
+        return NULL;
+    }
     if (g_font_type == FONT_SANS) {
         if (g_font_size == SIZE_SMALL) return &AmazonEmber_Medium9pt7b;
         return &AmazonEmber_Medium12pt7b;
@@ -221,8 +245,18 @@ static const GFXfont* get_active_reader_font(void) {
     }
 }
 
+void display_request_full_refresh(void) {
+    gdey037t03_request_full_refresh(epd_dev);
+}
+
 void display_update(bool full) {
+    // Partial refreshes slowly accumulate ghosting; clear it with a periodic full refresh
+    static int partials_since_full;
+    if (!full && ++partials_since_full >= EPD_FULL_REFRESH_INTERVAL) {
+        full = true;
+    }
     if (full) {
+        partials_since_full = 0;
         gdey037t03_request_full_refresh(epd_dev);
     }
 
@@ -419,12 +453,19 @@ static int display_draw_gfx_char_styled(int x, int y, uint8_t c, const GFXfont *
     if (c < 32) return 0;
 
     const uint8_t *bitmap = NULL;
-    const GFXglyph *glyph = font_get_glyph_styled((uint32_t)c, is_bold, is_italic, font, &bitmap);
+    bool has_style = false;
+    const GFXglyph *glyph = font_get_glyph_styled((uint32_t)c, is_bold, is_italic, font, &bitmap, &has_style);
 
     if (!glyph) {
         c = '?';
-        glyph = font_get_glyph_styled((uint32_t)c, is_bold, is_italic, font, &bitmap);
+        glyph = font_get_glyph_styled((uint32_t)c, is_bold, is_italic, font, &bitmap, &has_style);
         if (!glyph) return 0;
+    }
+
+    // Real bold/italic glyphs from an SD font need no synthesized styling
+    if (has_style) {
+        is_bold = false;
+        is_italic = false;
     }
 
     uint32_t bo = glyph->bitmapOffset;
@@ -496,37 +537,36 @@ static int display_draw_gfx_string_raw(int x, int y, const char *str, const GFXf
     return cur_x - x;
 }
 
-static int display_draw_gfx_string(int x, int y, const char *str, const GFXfont *font, uint8_t color) {
-    char decoded_buf[256];
+static int builtin_advance(const GFXfont *font, uint8_t c) {
+    uint16_t glyph_idx = (c >= font->first && c <= font->last) ? (c - font->first) : ('?' - font->first);
+    return font->glyph[glyph_idx].xAdvance;
+}
+
+// Decodes str into out (single-byte glyph codes), shortening it with "..." to fit
+// max_width. Returns the resulting width in pixels.
+static int fit_text(const char *str, const GFXfont *font, int max_width, char *out, size_t out_size) {
     int out_idx = 0;
     const char *p = str;
 
-    while (*p && out_idx < sizeof(decoded_buf) - 1) {
+    while (*p && out_idx < (int)out_size - 1) {
         uint8_t c = decode_utf8_char(&p);
         if (c == 0) break;
-        decoded_buf[out_idx++] = c;
+        out[out_idx++] = c;
     }
-    decoded_buf[out_idx] = 0;
+    out[out_idx] = 0;
 
     int total_width = 0;
     for (int i = 0; i < out_idx; i++) {
-        uint8_t c = decoded_buf[i];
-        uint16_t glyph_idx = (c >= font->first && c <= font->last) ? (c - font->first) : ('?' - font->first);
-        total_width += font->glyph[glyph_idx].xAdvance;
+        total_width += builtin_advance(font, (uint8_t)out[i]);
     }
 
-    int max_width = EPD_WIDTH - x - 5;
     if (total_width > max_width && out_idx > 3) {
         int w = 0;
-        int dot_adv = font->glyph['.' - font->first].xAdvance;
-        int ellip_w = dot_adv * 3;
+        int ellip_w = builtin_advance(font, '.') * 3;
         int cut_idx = out_idx;
 
         for (int i = 0; i < out_idx; i++) {
-            uint8_t c = decoded_buf[i];
-            uint16_t glyph_idx = (c >= font->first && c <= font->last) ? (c - font->first) : ('?' - font->first);
-            int adv = font->glyph[glyph_idx].xAdvance;
-
+            int adv = builtin_advance(font, (uint8_t)out[i]);
             if (w + adv + ellip_w > max_width) {
                 cut_idx = i;
                 break;
@@ -534,13 +574,90 @@ static int display_draw_gfx_string(int x, int y, const char *str, const GFXfont 
             w += adv;
         }
 
-        decoded_buf[cut_idx++] = '.';
-        decoded_buf[cut_idx++] = '.';
-        decoded_buf[cut_idx++] = '.';
-        decoded_buf[cut_idx] = 0;
+        out[cut_idx++] = '.';
+        out[cut_idx++] = '.';
+        out[cut_idx++] = '.';
+        out[cut_idx] = 0;
+        total_width = w + ellip_w;
+    }
+    return total_width;
+}
+
+static int display_draw_gfx_string(int x, int y, const char *str, const GFXfont *font, uint8_t color) {
+    char decoded_buf[256];
+    fit_text(str, font, EPD_WIDTH - x - 5, decoded_buf, sizeof(decoded_buf));
+    return display_draw_gfx_string_raw(x, y, decoded_buf, font, color);
+}
+
+// Draws str horizontally centred on center_x, shortened to max_width if needed
+static void draw_text_centered(int center_x, int y, const char *str, const GFXfont *font, int max_width, uint8_t color) {
+    char decoded_buf[256];
+    int w = fit_text(str, font, max_width, decoded_buf, sizeof(decoded_buf));
+    display_draw_gfx_string_raw(center_x - w / 2, y, decoded_buf, font, color);
+}
+
+void display_draw_icon(int x, int y, const Icon *icon, uint8_t color) {
+    int stride = (icon->width + 7) / 8;
+    for (int row = 0; row < icon->height; row++) {
+        const uint8_t *line = &icon->bits[row * stride];
+        for (int col = 0; col < icon->width; col++) {
+            if (line[col / 8] & (0x80 >> (col % 8))) {
+                display_draw_pixel(x + col, y + row, color);
+            }
+        }
+    }
+}
+
+void display_draw_carousel(const CarouselItem *items, int count, int selected) {
+    display_clear_buffer();
+    display_draw_battery(battery_get_percentage());
+
+    const int center_x = EPD_WIDTH / 2;
+    const CarouselItem *cur = &items[selected];
+
+    // Neighbours: small and unframed, so the framed centre item reads as the focus
+    if (count > 1) {
+        const CarouselItem *prev = &items[(selected + count - 1) % count];
+        const CarouselItem *next = &items[(selected + 1) % count];
+        const int side_offset = 132;
+        const int side_y = 92;
+        display_draw_icon(center_x - side_offset - prev->icon_small->width / 2, side_y, prev->icon_small, 0);
+        display_draw_icon(center_x + side_offset - next->icon_small->width / 2, side_y, next->icon_small, 0);
+        draw_text_centered(center_x - side_offset, side_y + prev->icon_small->height + 18, prev->label,
+                           &AmazonEmber_Medium9pt7b, 110, 0);
+        draw_text_centered(center_x + side_offset, side_y + next->icon_small->height + 18, next->label,
+                           &AmazonEmber_Medium9pt7b, 110, 0);
     }
 
-    return display_draw_gfx_string_raw(x, y, decoded_buf, font, color);
+    // Focused item: large icon in a rounded frame, label and one line of detail
+    const int icon_y = 54;
+    const int frame = 10;
+    int fx = center_x - cur->icon_large->width / 2 - frame;
+    int fw = cur->icon_large->width + frame * 2;
+    display_draw_rect(fx, icon_y - frame, fw, cur->icon_large->height + frame * 2, 0);
+    display_draw_rect(fx + 1, icon_y - frame + 1, fw - 2, cur->icon_large->height + frame * 2 - 2, 0);
+    display_draw_icon(center_x - cur->icon_large->width / 2, icon_y, cur->icon_large, 0);
+
+    int label_y = icon_y + cur->icon_large->height + frame + 26;
+    draw_text_centered(center_x, label_y, cur->label, &AmazonEmber_Medium12pt7b, EPD_WIDTH - 40, 0);
+    if (cur->detail && cur->detail[0]) {
+        draw_text_centered(center_x, label_y + 24, cur->detail, &AmazonEmber_Medium9pt7b, EPD_WIDTH - 40, 0);
+    }
+
+    // Position dots
+    const int dot = 6, gap = 10;
+    int dots_w = count * dot + (count - 1) * gap;
+    int dx = center_x - dots_w / 2;
+    for (int i = 0; i < count; i++) {
+        int x = dx + i * (dot + gap);
+        if (i == selected) {
+            display_fill_rect(x, EPD_HEIGHT - 16, dot, dot, 0);
+        } else {
+            display_draw_rect(x, EPD_HEIGHT - 16, dot, dot, 0);
+        }
+    }
+
+    display_update(false);
 }
 
 void display_draw_string(int x, int y, const char *str, uint8_t color) {
@@ -697,13 +814,8 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
     bool has_cover = false;
 
     if (book_name && book_name[0] != '\0') {
-        char full_book_path[256];
-        if (strncmp(book_name, "/SD:", 4) == 0) {
-            snprintf(full_book_path, sizeof(full_book_path), "%s", book_name);
-        } else {
-            snprintf(full_book_path, sizeof(full_book_path), "/SD:/BOOKS/%s", book_name);
-        }
-        has_cover = epub_extract_cover_image(full_book_path, cover_gray_buf, cover_w, cover_h);
+        const EpubBook *epub = storage_get_epub(book_name);
+        has_cover = epub && epub_extract_cover_image(epub, cover_gray_buf, cover_w, cover_h);
     }
 
     if (has_cover) {
@@ -824,16 +936,18 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
     display_update(true);
 }
 
-uint32_t display_draw_reader_page(const char *book_name, const char *text_page, uint32_t progress_pct) {
-    display_clear_buffer();
+// Layout width of c, from the same glyph source used to draw it (font == NULL: SD font)
+static int glyph_advance(const GFXfont *font, uint8_t c) {
+    const GFXglyph *g = font_get_glyph((uint32_t)c, font, NULL);
+    if (!g) g = font_get_glyph('?', font, NULL);
+    return g ? g->xAdvance : 0;
+}
 
-    // Header Title & Battery Icon on Top Bar
-    display_draw_gfx_string(10, 15, book_name, &AmazonEmber_Medium9pt7b, 0);
-    display_draw_battery(battery_get_percentage());
-    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
-
+// Lays out one page of body text and returns the bytes of text_page it consumed.
+// With draw == false nothing is rendered, so page breaks can be computed off-screen.
+static uint32_t layout_reader_text(const char *text_page, bool draw, uint8_t style_in) {
     const GFXfont *active_font = get_active_reader_font();
-    int font_height = (g_font_size == SIZE_SMALL) ? 14 : 18;
+    int font_height = active_font ? ((g_font_size == SIZE_SMALL) ? 14 : 18) : font_sd_line_height();
     int line_height = font_height + ((g_line_spacing == SPACING_COMPACT) ? 4 : ((g_line_spacing == SPACING_RELAXED) ? 10 : 7));
 
     int margin_top = 41; // +3px top padding below header bar
@@ -844,9 +958,10 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
     int cur_y = margin_top;
     int max_y = margin_bottom - font_height + 4;
 
-    bool page_italic = false;
-    bool page_bold = false;
-    bool page_underline = false;
+    // Styles still open from the previous page
+    bool page_italic = (style_in & READER_STYLE_ITALIC) != 0;
+    bool page_bold = (style_in & READER_STYLE_BOLD) != 0;
+    bool page_underline = (style_in & READER_STYLE_UNDERLINE) != 0;
 
     const char *p = text_page;
     const char *page_start = text_page;
@@ -884,7 +999,7 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
 
             if (*p == ' ' || *p == '\t') {
                 while (*p == ' ' || *p == '\t') p++;
-                int space_adv = active_font->glyph[0].xAdvance;
+                int space_adv = glyph_advance(active_font, ' ');
                 if (line_len > 0 && (line_width + space_adv <= max_width)) {
                     line_buf[line_len++] = ' ';
                     line_width += space_adv;
@@ -896,12 +1011,7 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
                 uint8_t c = decode_utf8_char(&p);
                 if (c == 0) break;
 
-                int adv = 0;
-                if (c >= 32) {
-                    uint16_t glyph_idx = (c >= active_font->first && c <= active_font->last) ?
-                                         (c - active_font->first) : ('?' - active_font->first);
-                    adv = active_font->glyph[glyph_idx].xAdvance;
-                }
+                int adv = (c >= 32) ? glyph_advance(active_font, c) : 0;
 
                 decoded_word[word_len++] = c;
                 word_width += adv;
@@ -914,17 +1024,12 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
                     line_width += word_width;
                 } else {
                     int chunk_w = 0;
-                    int hyphen_adv = active_font->glyph['-' - active_font->first].xAdvance;
+                    int hyphen_adv = glyph_advance(active_font, '-');
                     p = word_start_p;
                     while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
                         const char *before_char = p;
                         uint8_t c = decode_utf8_char(&p);
-                        int adv = 0;
-                        if (c >= 32) {
-                            uint16_t glyph_idx = (c >= active_font->first && c <= active_font->last) ?
-                                                 (c - active_font->first) : ('?' - active_font->first);
-                            adv = active_font->glyph[glyph_idx].xAdvance;
-                        }
+                        int adv = (c >= 32) ? glyph_advance(active_font, c) : 0;
                         if (chunk_w + adv + hyphen_adv > max_width) {
                             p = before_char;
                             line_buf[line_len++] = '-';
@@ -949,12 +1054,31 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
 
         line_buf[line_len] = 0;
         if (line_len > 0) {
-            display_draw_gfx_string_styled(margin_left, cur_y, line_buf, line_len, active_font, 0, &page_italic, &page_bold, &page_underline);
+            if (draw) {
+                display_draw_gfx_string_styled(margin_left, cur_y, line_buf, line_len, active_font, 0, &page_italic, &page_bold, &page_underline);
+            }
             cur_y += line_height;
         } else {
             if (p == line_start_p && *p) p++;
         }
     }
+
+    return (uint32_t)(p - page_start);
+}
+
+uint32_t display_measure_reader_page(const char *text_page) {
+    return layout_reader_text(text_page, false, 0);
+}
+
+uint32_t display_draw_reader_page(const char *book_name, const char *text_page, uint32_t progress_pct, uint8_t style_in) {
+    display_clear_buffer();
+
+    // Header Title & Battery Icon on Top Bar
+    display_draw_gfx_string(10, 15, book_name, &AmazonEmber_Medium9pt7b, 0);
+    display_draw_battery(battery_get_percentage());
+    display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
+
+    uint32_t consumed = layout_reader_text(text_page, true, style_in);
 
     int bar_y = EPD_HEIGHT - 6;
     display_draw_rect(8, bar_y, EPD_WIDTH - 16, 4, 0);
@@ -964,7 +1088,7 @@ uint32_t display_draw_reader_page(const char *book_name, const char *text_page, 
     }
 
     display_update(false);
-    return (uint32_t)(p - page_start);
+    return consumed;
 }
 
 void display_clear_buffer(void) {

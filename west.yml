@@ -1,18 +1,16 @@
 manifest:
   remotes:
-    - name: zephyrproject-rtos
-      url-base: https://github.com/zephyrproject-rtos
-    - name: nrfconnect
+    - name: ncs
       url-base: https://github.com/nrfconnect
 
   projects:
-    - name: zephyr
-      remote: zephyrproject-rtos
-      revision: v3.5.0
-      import: true
+    # nRF Connect SDK. Importing it pulls in the matching sdk-zephyr fork
+    # and all required modules (hal_nordic, mcuboot, littlefs, fatfs, ...).
     - name: nrf
-      remote: nrfconnect
-      revision: v2.5.0
+      remote: ncs
+      repo-path: sdk-nrf
+      revision: v3.4.1
+      import: true
 
   self:
-    path: app
+    path: nrf_epd

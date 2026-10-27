@@ -2,6 +2,7 @@
 #include "epub.h"
 #include <zephyr/fs/fs.h>
 #include <zephyr/fs/fs_sys.h>
+#include <zephyr/storage/disk_access.h>
 #include <ff.h>
 #include <zephyr/logging/log.h>
 #include <stdio.h>
@@ -10,6 +11,8 @@
 #include <ctype.h>
 
 LOG_MODULE_REGISTER(storage, LOG_LEVEL_INF);
+
+#define SD_DISK_NAME "SD"  // disk-name in app.overlay
 
 static FATFS fat_fs;
 static struct fs_mount_t sd_mount_point = {
@@ -20,7 +23,7 @@ static struct fs_mount_t sd_mount_point = {
 
 static EpubBook s_cached_epub;
 static bool s_epub_cached = false;
-static char s_cached_epub_path[256] = {0};
+static char s_cached_epub_name[256] = {0};
 
 static bool is_valid_book_file(const char *str) {
     size_t len = strlen(str);
@@ -134,6 +137,31 @@ int storage_init(void) {
     return 0;
 }
 
+// The FAT volume must not be mounted while the host writes the card over USB
+int storage_release_for_usb(void) {
+    s_epub_cached = false;
+    int res = fs_unmount(&sd_mount_point);
+    if (res != 0) {
+        LOG_ERR("SD unmount failed (err=%d)", res);
+        return res;
+    }
+    // Unmounting powers the disk down; USB mass storage needs it running
+    res = disk_access_ioctl(SD_DISK_NAME, DISK_IOCTL_CTRL_INIT, NULL);
+    if (res != 0) {
+        LOG_ERR("SD disk init for USB failed (err=%d)", res);
+    }
+    return res;
+}
+
+int storage_reclaim_from_usb(void) {
+    disk_access_ioctl(SD_DISK_NAME, DISK_IOCTL_CTRL_DEINIT, NULL);
+    int res = fs_mount(&sd_mount_point);
+    if (res != 0) {
+        LOG_ERR("SD remount failed (err=%d)", res);
+    }
+    return res;
+}
+
 int storage_list_sd_books(char books[][64], int max_books) {
     struct fs_dir_t dir;
     struct fs_dirent entry;
@@ -203,15 +231,41 @@ static bool resolve_book_path(const char *book_name, char *out_path, size_t out_
     return false;
 }
 
-uint32_t storage_get_book_size(const char *book_name) {
+// Returns the indexed EPUB for book_name, converting it on first open. Only one book
+// is kept in RAM, shared by the reader, chapter list and lock screen.
+static EpubBook *load_epub(const char *book_name) {
+    if (!book_name || !ends_with_epub(book_name)) return NULL;
+
+    // Called several times per page turn; skip path resolution (SD stats) on a hit
+    if (s_epub_cached && strcmp(s_cached_epub_name, book_name) == 0) {
+        return &s_cached_epub;
+    }
+
     char full_path[256];
     resolve_book_path(book_name, full_path, sizeof(full_path));
 
-    if (ends_with_epub(book_name)) {
-        if (s_epub_cached && strcmp(s_cached_epub_path, full_path) == 0) {
-            return s_cached_epub.total_book_text_len;
-        }
+    s_epub_cached = false;
+    if (!epub_scan_chapters(full_path, &s_cached_epub)) {
+        LOG_ERR("Failed to scan EPUB chapters: %s", full_path);
+        return NULL;
     }
+    snprintf(s_cached_epub_name, sizeof(s_cached_epub_name), "%s", book_name);
+    s_epub_cached = true;
+    return &s_cached_epub;
+}
+
+const EpubBook *storage_get_epub(const char *book_name) {
+    return load_epub(book_name);
+}
+
+uint32_t storage_get_book_size(const char *book_name) {
+    if (ends_with_epub(book_name)) {
+        const EpubBook *book = load_epub(book_name);
+        return book ? book->total_book_text_len : 0;
+    }
+
+    char full_path[256];
+    resolve_book_path(book_name, full_path, sizeof(full_path));
 
     struct fs_dirent entry;
     if (fs_stat(full_path, &entry) == 0) {
@@ -226,23 +280,13 @@ bool storage_get_book_metadata(const char *book_name, char *title_out, size_t ti
     if (title_out && title_max > 0) title_out[0] = '\0';
     if (author_out && author_max > 0) author_out[0] = '\0';
 
-    char full_path[256];
-    resolve_book_path(book_name, full_path, sizeof(full_path));
-
-    if (ends_with_epub(book_name)) {
-        if (!s_epub_cached || strcmp(s_cached_epub_path, full_path) != 0) {
-            if (epub_scan_chapters(full_path, &s_cached_epub)) {
-                snprintf(s_cached_epub_path, sizeof(s_cached_epub_path), "%s", full_path);
-                s_epub_cached = true;
-            }
+    const EpubBook *book = load_epub(book_name);
+    if (book) {
+        if (book->title[0] != '\0' && title_out) {
+            snprintf(title_out, title_max, "%s", book->title);
         }
-        if (s_epub_cached) {
-            if (s_cached_epub.title[0] != '\0' && title_out) {
-                snprintf(title_out, title_max, "%s", s_cached_epub.title);
-            }
-            if (s_cached_epub.author[0] != '\0' && author_out) {
-                snprintf(author_out, author_max, "%s", s_cached_epub.author);
-            }
+        if (book->author[0] != '\0' && author_out) {
+            snprintf(author_out, author_max, "%s", book->author);
         }
     }
 
@@ -294,23 +338,16 @@ bool storage_read_book_page(const char *book_name, uint32_t offset, char *page_b
     if (!book_name || book_name[0] == '\0') return false;
 
     char full_path[256];
-    resolve_book_path(book_name, full_path, sizeof(full_path));
 
-    // Handle .epub files directly
+    // EPUBs are read from their converted plain-text cache
     if (ends_with_epub(book_name)) {
-        if (!s_epub_cached || strcmp(s_cached_epub_path, full_path) != 0) {
-            if (!epub_scan_chapters(full_path, &s_cached_epub)) {
-                LOG_ERR("Failed to scan EPUB chapters: %s", full_path);
-                return false;
-            }
-            snprintf(s_cached_epub_path, sizeof(s_cached_epub_path), "%s", full_path);
-            s_epub_cached = true;
-        }
-
-        return epub_read_book_offset(&s_cached_epub, offset, page_buf, buf_size, bytes_read);
+        const EpubBook *book = load_epub(book_name);
+        if (!book) return false;
+        epub_build_text_path(book->book_path, full_path, sizeof(full_path));
+    } else {
+        resolve_book_path(book_name, full_path, sizeof(full_path));
     }
 
-    // Standard .txt file reading
     struct fs_file_t file;
     fs_file_t_init(&file);
 
@@ -412,19 +449,6 @@ bool storage_read_stats(uint32_t *out_total_seconds) {
     return true;
 }
 
-bool storage_write_stats(uint32_t total_seconds) {
-    struct fs_file_t file;
-    fs_file_t_init(&file);
-    if (fs_open(&file, STATS_FILE, FS_O_CREATE | FS_O_WRITE) != 0) {
-        return false;
-    }
-
-    char line[32];
-    int len = snprintf(line, sizeof(line), "%u\n", total_seconds);
-    fs_write(&file, line, len);
-    fs_close(&file);
-    return true;
-}
 
 #define SLEEP_STATE_FILE SD_MOUNT_POINT "/sleep.txt"
 
@@ -508,15 +532,4 @@ bool storage_read_refresh_settings(int *profile, uint8_t *interval, uint8_t *cou
     return true;
 }
 
-bool storage_write_refresh_settings(int profile, uint8_t interval, uint8_t count) {
-    struct fs_file_t file;
-    fs_file_t_init(&file);
-    if (fs_open(&file, REFRESH_SETTINGS_FILE, FS_O_CREATE | FS_O_WRITE) != 0) return false;
-
-    char line[64];
-    int len = snprintf(line, sizeof(line), "%d:%u:%u\n", profile, interval, count);
-    fs_write(&file, line, len);
-    fs_close(&file);
-    return true;
-}
 

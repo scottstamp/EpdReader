@@ -6,12 +6,14 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "display_gdey037t03.h"
+#include "icons.h"
 
 typedef enum {
     FONT_SERIF,     // Bookerly
     FONT_SANS,      // Amazon Ember
     FONT_LITERATA,  // Literata
-    FONT_ATKINSON   // Atkinson Hyperlegible
+    FONT_ATKINSON,  // Atkinson Hyperlegible
+    FONT_SD         // .fnt loaded from /SD:/fonts (reader text only)
 } FontType;
 
 typedef enum {
@@ -37,6 +39,8 @@ void display_power_on(void);
 void display_power_off(void);
 void display_app_clear(void);
 void display_update(bool full_refresh);
+// Make the next display_update a full refresh
+void display_request_full_refresh(void);
 void display_set_flipped(bool flipped);
 bool display_is_flipped(void);
 
@@ -47,14 +51,31 @@ void display_draw_rect(int x, int y, int w, int h, uint8_t color);
 void display_draw_line(int x0, int y0, int x1, int y1, uint8_t color);
 void display_draw_string(int x, int y, const char *str, uint8_t color);
 
+typedef struct {
+    const Icon *icon_large;
+    const Icon *icon_small;
+    const char *label;
+    const char *detail;   // optional second line under the focused item
+} CarouselItem;
+
 // Views
+void display_draw_icon(int x, int y, const Icon *icon, uint8_t color);
+// Main menu: focused item centred with its neighbours either side; Prev/Next rotate
+void display_draw_carousel(const CarouselItem *items, int count, int selected);
 void display_draw_menu(const char *header, const char **options, int count, int selected_idx);
 void display_draw_menu_ext(const char *header, const char *sub_footer, const char **options, int count, int selected_idx);
 void display_draw_message(const char *title, const char *msg, bool is_alert);
 void display_draw_progress(const char *task, int percentage);
 void display_draw_lockscreen(const char *book_name, const char *title, const char *author, const char *chapter_title, uint32_t progress_pct);
 void display_draw_atkinson_dithered(int dst_x, int dst_y, int target_w, int target_h, const uint8_t *gray_img, int img_w, int img_h);
-uint32_t display_draw_reader_page(const char *book_name, const char *text_page, uint32_t progress_pct);
+// Inline style state at the start of a page (styles can stay open across page breaks)
+#define READER_STYLE_ITALIC    0x01
+#define READER_STYLE_BOLD      0x02
+#define READER_STYLE_UNDERLINE 0x04
+
+uint32_t display_draw_reader_page(const char *book_name, const char *text_page, uint32_t progress_pct, uint8_t style_in);
+// Bytes of text_page that display_draw_reader_page would fit on one page, without drawing
+uint32_t display_measure_reader_page(const char *text_page);
 
 // Font/Settings accessors & manipulators
 FontType display_get_font(void);
@@ -91,5 +112,7 @@ void display_set_pulse_count(uint8_t count);
 void display_cycle_pulse_count(void);
 
 const char *display_get_refresh_profile_name(void);
+void display_set_refresh_config(enum gdey037t03_refresh_profile profile, uint8_t interval, uint8_t count);
+void display_get_refresh_config(enum gdey037t03_refresh_profile *profile, uint8_t *interval, uint8_t *count);
 
 #endif // DISPLAY_H

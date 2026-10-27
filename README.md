@@ -55,7 +55,7 @@ nrf_epd/
 ## ⚡ Flashing the Firmware
 
 ### Option 1: Drag & Drop via Adafruit UF2 Bootloader (Recommended)
-1. Double-click the **SELECT button** (or double-tap Reset if accessible).
+1. Choose **Bootloader Mode** in the main menu (or double-tap Reset if accessible).
 2. The board will reboot into bootloader mode and mount as a USB storage drive named `NICENANO`.
 3. Copy the output binary file `build/zephyr/zephyr.uf2` directly onto the `NICENANO` drive:
    ```powershell
@@ -76,6 +76,5 @@ west flash
 |---|---|
 | **PREV Button** | Page Backward / Navigate Up in Menus |
 | **NEXT Button** | Page Forward / Navigate Down in Menus |
-| **SELECT Single-Click** | Select Item / Open Menu / Toggle Screen |
-| **SELECT Double-Click** | Reboot into **Adafruit UF2 Bootloader** (`NICENANO` USB Drive) |
-| **SELECT 5s Long Press** | Enter **System OFF Deep Sleep** (< 2 µA power draw) |
+| **SELECT Click** | Select item / open the reader menu (acts on release) |
+| **SELECT Hold (1s)** | Back to the home carousel from the reader or any submenu; on the home screen, **System OFF Deep Sleep** (< 2 µA power draw) |

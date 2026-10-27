@@ -88,9 +88,23 @@ uint8_t battery_get_percentage_from_mv(uint16_t mv) {
     return (uint8_t)(((mv - 3300) * 100) / (4200 - 3300));
 }
 
+// Every screen draws the battery icon; sampling once a minute is plenty
+#define BATTERY_CACHE_MS 60000
+
 uint8_t battery_get_percentage(void) {
+    static uint8_t cached_pct;
+    static uint32_t cached_at;
+    static bool cached;
+
+    uint32_t now = k_uptime_get_32();
+    if (cached && (now - cached_at) < BATTERY_CACHE_MS) {
+        return cached_pct;
+    }
+
     uint16_t mv = battery_read_mv();
-    uint8_t pct = battery_get_percentage_from_mv(mv);
-    LOG_DBG("Battery level: %u mV -> %u%%", mv, pct);
-    return pct;
+    cached_pct = battery_get_percentage_from_mv(mv);
+    cached_at = now;
+    cached = true;
+    LOG_DBG("Battery level: %u mV -> %u%%", mv, cached_pct);
+    return cached_pct;
 }
