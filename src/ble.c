@@ -12,6 +12,9 @@ LOG_MODULE_REGISTER(ble, LOG_LEVEL_INF);
 static struct bt_conn *current_conn = NULL;
 static ble_status_cb_t user_status_cb = NULL;
 static ble_data_cb_t user_data_cb = NULL;
+static bool bt_ready = false;
+// Advertising is wanted (upload screen open); resumed after each disconnect
+static volatile bool adv_wanted = false;
 
 // Nordic UART Service (NUS) UUIDs
 #define BT_UUID_NUS_VAL BT_UUID_128_ENCODE(0x6e400001, 0xb5a3, 0xf393, 0xe0a9, 0xe50e24dcca9e)
@@ -24,6 +27,10 @@ static struct bt_uuid_128 nus_tx_uuid = BT_UUID_INIT_128(BT_UUID_NUS_TX_VAL);
 
 static ssize_t nus_rx_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                             const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    // Each write is one upload frame; long (prepared) writes are not part of it
+    if (offset != 0) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
     if (user_data_cb && len > 0) {
         user_data_cb((const uint8_t *)buf, len);
     }
@@ -62,9 +69,27 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
     }
 }
 
+static void adv_start(void);
+
+static void adv_restart_handler(struct k_work *work) {
+    if (adv_wanted) {
+        adv_start();
+    }
+}
+
+static K_WORK_DEFINE(adv_restart_work, adv_restart_handler);
+
+// The connection object is free again, so connectable advertising can resume
+static void recycled(void) {
+    if (adv_wanted) {
+        k_work_submit(&adv_restart_work);
+    }
+}
+
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected,
     .disconnected = disconnected,
+    .recycled = recycled,
 };
 
 static const struct bt_data ad[] = {
@@ -79,18 +104,25 @@ static const struct bt_data sd[] = {
 int ble_init(ble_status_cb_t status_cb, ble_data_cb_t data_cb) {
     user_status_cb = status_cb;
     user_data_cb = data_cb;
+    if (bt_ready) {
+        return 0;
+    }
 
     int err = bt_enable(NULL);
+    if (err == -EALREADY) {
+        err = 0;
+    }
     if (err) {
         LOG_ERR("Bluetooth init failed (err %d)", err);
         return err;
     }
 
+    bt_ready = true;
     LOG_INF("Bluetooth initialized successfully.");
     return 0;
 }
 
-void ble_start_advertising(void) {
+static void adv_start(void) {
     int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
     if (err) {
         LOG_ERR("Advertising failed to start (err %d)", err);
@@ -99,13 +131,41 @@ void ble_start_advertising(void) {
     }
 }
 
+void ble_start_advertising(void) {
+    adv_wanted = true;
+    if (!current_conn) {
+        adv_start(); // otherwise recycled() resumes it once the link is gone
+    }
+}
+
 void ble_stop_advertising(void) {
+    struct k_work_sync sync;
+    adv_wanted = false;
+    k_work_cancel_sync(&adv_restart_work, &sync);
     bt_le_adv_stop();
     LOG_INF("Advertising stopped.");
 }
 
 bool ble_is_connected(void) {
     return (current_conn != NULL);
+}
+
+void ble_disconnect(void) {
+    struct bt_conn *conn = current_conn ? bt_conn_ref(current_conn) : NULL;
+    if (conn) {
+        bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        bt_conn_unref(conn);
+    }
+}
+
+uint16_t ble_get_mtu(void) {
+    struct bt_conn *conn = current_conn ? bt_conn_ref(current_conn) : NULL;
+    uint16_t mtu = 23; // ATT default before the exchange
+    if (conn) {
+        mtu = bt_gatt_get_mtu(conn);
+        bt_conn_unref(conn);
+    }
+    return mtu;
 }
 
 void ble_update_battery_level(uint8_t level) {

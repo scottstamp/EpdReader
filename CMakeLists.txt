@@ -18,6 +18,8 @@ target_sources(app PRIVATE
     src/storage.c
     src/buttons.c
     src/ble.c
+    src/ble_upload.c
+    src/upload_proto.c
     src/battery.c
     src/prefs.c
     src/puff.c

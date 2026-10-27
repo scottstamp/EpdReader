@@ -6,10 +6,15 @@
 typedef void (*ble_status_cb_t)(bool connected);
 typedef void (*ble_data_cb_t)(const uint8_t *data, uint16_t len);
 
+// Callbacks run in the Bluetooth RX thread. Safe to call again: only swaps the callbacks.
 int ble_init(ble_status_cb_t status_cb, ble_data_cb_t data_cb);
+// Advertising also resumes after each disconnect until ble_stop_advertising()
 void ble_start_advertising(void);
 void ble_stop_advertising(void);
 bool ble_is_connected(void);
+void ble_disconnect(void);
+// Negotiated ATT MTU of the current link (23 if none)
+uint16_t ble_get_mtu(void);
 void ble_update_battery_level(uint8_t level);
 int ble_send_data(const uint8_t *data, uint16_t len);
 
