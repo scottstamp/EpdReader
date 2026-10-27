@@ -650,11 +650,11 @@ static void render_current_state(void) {
             // Shorter waveforms turn pages faster but erase old text less fully
             const char *help_footer = NULL;
             if (prof == GDEY037T03_PROFILE_NORMAL) {
-                help_footer = "Normal: interval 2, 3 pulses - cleanest, slowest";
+                help_footer = "Normal: interval 2, 3 pulses, 80 Hz - clean";
             } else if (prof == GDEY037T03_PROFILE_FAST) {
-                help_footer = "Fast: interval 2, 2 pulses - quicker, more ghosting";
+                help_footer = "Fast: interval 2, 2 pulses, default rate - more ghosting";
             } else if (prof == GDEY037T03_PROFILE_TURBO) {
-                help_footer = "Turbo: interval 1, 1 pulse - quickest, most ghosting";
+                help_footer = "Turbo: interval 1, 1 pulse, default rate - most ghosting";
             } else {
                 help_footer = "Custom: higher frame rate = shorter refresh";
             }

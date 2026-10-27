@@ -309,6 +309,9 @@ int gdey037t03_get_refresh_config(const struct device *dev, struct gdey037t03_re
     return 0;
 }
 
+// Normal's frame rate: tuned on the GDEY037T03 (interval 2, 3 pulses at 80 Hz erases cleanly)
+#define NORMAL_FRAME_RATE_HZ 80
+
 // *hz = 0 leaves the PLL at the controller default
 static void partial_waveform_params(const struct gdey037t03_data *data, uint8_t *t, uint8_t *rp, uint8_t *hz) {
     *hz = 0;
@@ -329,6 +332,7 @@ static void partial_waveform_params(const struct gdey037t03_data *data, uint8_t 
     default: // GDEY037T03_PROFILE_NORMAL
         *t = 2;
         *rp = 3;
+        *hz = NORMAL_FRAME_RATE_HZ;
         break;
     }
 }

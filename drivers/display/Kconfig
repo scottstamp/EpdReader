@@ -14,12 +14,12 @@ config GDEY037T03_DEFAULT_REFRESH_PROFILE
 	range 0 3
 	help
 	  Default refresh profile for the GDEY037T03 display.
-	  0 = Normal (pulse interval 2, 3 pulses)
+	  0 = Normal (pulse interval 2, 3 pulses, 80 Hz frame rate)
 	  1 = Fast (pulse interval 2, 2 pulses)
 	  2 = Turbo (pulse interval 1, 1 pulse)
 	  3 = Custom (user defined pulse interval, pulse count and frame rate)
 	  Fewer/shorter pulses give shorter refreshes but erase old text less
-	  completely. All but Custom run at the controller's default frame rate.
+	  completely. Fast and Turbo run at the controller's default frame rate.
 
 config GDEY037T03_CUSTOM_PULSE_INTERVAL
 	int "Custom pulse timing interval (frames/cycles)"
