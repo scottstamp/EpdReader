@@ -199,14 +199,16 @@ int main(int argc, char **argv) {
     const CarouselItem items[] = {
         { &icon_continue_large, &icon_continue_small, "Continue", "He Who Fights with Monsters 1 - Shirtaloon - 42%" },
         { &icon_library_large, &icon_library_small, "Library", "Books on the SD card" },
+        { &icon_lists_large, &icon_lists_small, "Lists", "To-do and grocery lists" },
         { &icon_settings_large, &icon_settings_small, "Settings", "Text, display, firmware" },
         { &icon_transfer_large, &icon_transfer_small, "Transfer", "USB drive or Bluetooth" },
         { &icon_stats_large, &icon_stats_small, "Stats", "12h 05m read in total" },
         { &icon_sleep_large, &icon_sleep_small, "Sleep", "Lock screen and power off" },
     };
     char path[512];
-    for (int i = 0; i < 6; i++) {
-        display_draw_carousel(items, 6, i);
+    const int home_count = (int)(sizeof(items) / sizeof(items[0]));
+    for (int i = 0; i < home_count; i++) {
+        display_draw_carousel(items, home_count, i);
         snprintf(path, sizeof(path), "%s/carousel_%d.pbm", argv[1], i);
         dump(path);
     }
@@ -214,6 +216,16 @@ int main(int argc, char **argv) {
                                "Orientation: Flipped", "Refresh: Normal", "Firmware update (bootloader)", "[Back]" };
     display_draw_menu("Settings", settings, 8, 0);
     snprintf(path, sizeof(path), "%s/settings.pbm", argv[1]);
+    dump(path);
+
+    // Lists screens as main.c builds them
+    const char *lists_menu[] = { "Groceries  (1/3)", "To-do  (0/2)", "[Back]" };
+    display_draw_menu_ext("Lists", "Bluetooth: browser connected", lists_menu, 3, 0);
+    snprintf(path, sizeof(path), "%s/lists.pbm", argv[1]);
+    dump(path);
+    const char *items_menu[] = { "[  ] Milk", "[x] Eggs", "[  ] Crème fraîche", "Clear checked", "[Back]" };
+    display_draw_menu_ext("Groceries (1/3)", "Edit in a browser over Bluetooth", items_menu, 5, 1);
+    snprintf(path, sizeof(path), "%s/list_items.pbm", argv[1]);
     dump(path);
 
     // Menus and headers use the built-in fonts: accents fall back to ASCII

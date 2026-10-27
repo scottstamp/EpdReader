@@ -146,9 +146,24 @@ def icon_sleep():
     return ops
 
 
+def icon_lists():
+    # Checklist: three rows of box + line; done rows have a filled box (a tick is mush at 36 px)
+    ops = []
+    box = 0.22
+    for i, y in enumerate((0.10, 0.40, 0.70)):
+        if i < 2:
+            ops.append((rect(0.06, y, 0.06 + box, y + box), 1))
+        else:
+            ops.append((polyline([(0.06, y), (0.06 + box, y), (0.06 + box, y + box), (0.06, y + box)], S * 0.8,
+                                 closed=True), 1))
+        ops.append((line(0.42, y + box / 2, 0.94, y + box / 2, S), 1))
+    return ops
+
+
 ICONS = {
     "continue": icon_continue,
     "library": icon_library,
+    "lists": icon_lists,
     "settings": icon_settings,
     "transfer": icon_transfer,
     "stats": icon_stats,

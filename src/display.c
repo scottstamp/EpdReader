@@ -800,6 +800,22 @@ void display_draw_menu(const char *title, const char *options[], int count, int 
     display_draw_menu_ext(title, NULL, options, count, selected_idx);
 }
 
+void display_menu_window(int count, int selected_idx, int *first, int *visible) {
+    const int max_visible = DISPLAY_MENU_ROWS;
+    int scroll_top = 0;
+    if (count > max_visible) {
+        if (selected_idx >= max_visible - 1) {
+            scroll_top = selected_idx - (max_visible - 2);
+        }
+        if (scroll_top + max_visible > count) {
+            scroll_top = count - max_visible;
+        }
+        if (scroll_top < 0) scroll_top = 0;
+    }
+    *first = scroll_top;
+    *visible = (count < max_visible) ? count : max_visible;
+}
+
 void display_draw_menu_ext(const char *title, const char *sub_footer, const char *options[], int count, int selected_idx) {
     display_clear_buffer();
 
@@ -814,19 +830,8 @@ void display_draw_menu_ext(const char *title, const char *sub_footer, const char
     display_draw_battery(battery_get_percentage());
     display_fill_rect(0, 20, EPD_WIDTH, 1, 0);
 
-    int max_visible = 10;
-    int scroll_top = 0;
-    if (count > max_visible) {
-        if (selected_idx >= max_visible - 1) {
-            scroll_top = selected_idx - (max_visible - 2);
-        }
-        if (scroll_top + max_visible > count) {
-            scroll_top = count - max_visible;
-        }
-        if (scroll_top < 0) scroll_top = 0;
-    }
-
-    int visible_count = (count < max_visible) ? count : max_visible;
+    int scroll_top, visible_count;
+    display_menu_window(count, selected_idx, &scroll_top, &visible_count);
     int start_y = 38;
     int item_height = 21;
 

@@ -22,6 +22,9 @@ target_sources(app PRIVATE
     src/upload_proto.c
     src/battery.c
     src/prefs.c
+    src/lists_doc.c
+    src/lists.c
+    src/lists_ble.c
     src/puff.c
     src/inflate_stream.c
     src/html_text.c

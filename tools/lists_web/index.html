@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EPD Reader - Lists</title>
+<style>
+  :root { --fg: #1d1d1f; --muted: #6e6e73; --line: #d8d8dc; --bg: #f5f5f7; --card: #fff;
+          --accent: #1f6feb; --warn-bg: #fff4d6; --warn: #7a5200; --err-bg: #fde7e9; --err: #a1121f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); }
+  header { position: sticky; top: 0; z-index: 1; background: var(--card); border-bottom: 1px solid var(--line);
+           padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  header h1 { font-size: 17px; margin: 0 12px 0 0; }
+  .status { color: var(--muted); font-size: 13px; margin-right: auto; }
+  .status b { color: var(--fg); font-weight: 600; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); border-radius: 6px;
+           padding: 5px 12px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.icon { padding: 2px 8px; color: var(--muted); }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  .banner { border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; display: flex; gap: 12px; align-items: center; }
+  .banner.warn { background: var(--warn-bg); color: var(--warn); }
+  .banner.err { background: var(--err-bg); color: var(--err); }
+  .banner span { flex: 1; }
+  .empty { color: var(--muted); text-align: center; padding: 48px 16px; }
+  .list { background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; }
+  .list-head { display: flex; gap: 6px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .list-head input { font-weight: 600; font-size: 16px; }
+  .count { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  input[type=text] { font: inherit; flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 5px;
+                     padding: 4px 6px; background: transparent; color: inherit; }
+  input[type=text]:hover { border-color: var(--line); }
+  input[type=text]:focus { border-color: var(--accent); outline: none; background: #fff; }
+  ul { list-style: none; margin: 0; padding: 4px 6px; }
+  li { display: flex; gap: 4px; align-items: center; padding: 1px 0; }
+  li.done input[type=text] { color: var(--muted); text-decoration: line-through; }
+  li input[type=checkbox] { width: 18px; height: 18px; margin: 0 4px 0 6px; flex: none; }
+  .add { display: flex; gap: 6px; padding: 6px 12px 10px; }
+  .add input { border-color: var(--line); }
+  footer { color: var(--muted); font-size: 13px; display: flex; justify-content: space-between; gap: 12px;
+           flex-wrap: wrap; margin-top: 8px; }
+  .meter { white-space: nowrap; }
+  .meter.over { color: var(--err); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>EPD Reader Lists</h1>
+  <div class="status" id="status">Not connected</div>
+  <button id="connect" class="primary">Connect</button>
+  <button id="demo" title="Try the editor without a device">Demo</button>
+  <button id="reload" disabled>Reload</button>
+  <button id="save" class="primary" disabled>Save to device</button>
+</header>
+<main>
+  <div id="banner"></div>
+  <div id="lists"><p class="empty">Open <b>Lists</b> on the reader, then press <b>Connect</b>.</p></div>
+  <div id="toolbar" hidden>
+    <button id="add-list">+ Add list</button>
+  </div>
+  <footer id="footer" hidden>
+    <span>Changes are sent when you press <b>Save to device</b>. Checking items on the reader updates this page.</span>
+    <span class="meter" id="meter"></span>
+  </footer>
+</main>
+
+<script type="module">
+import { DEVICE_NAME, SERVICE_UUID, DATA_UUID, MAX_LISTS, MAX_ITEMS, PUT_MAX, ERR_CONFLICT,
+         ListsClient, PutError, cleanText, docProblem, docSize, parseDoc } from './lists.js';
+
+const $ = (id) => document.getElementById(id);
+const DEMO_DOC = '@rev 0\n# Groceries\n[ ] Milk\n[x] Eggs\n[ ] Crème fraîche\n# To-do\n[ ] Call the bank\n[ ] Return library books\n';
+
+const state = {
+  device: null,
+  client: null,
+  demo: false,
+  doc: null,         // { rev, lists: [{ name, items: [{ text, checked }] }] }
+  dirty: false,
+  busy: false,
+  deviceRev: null,   // latest revision the device announced
+};
+
+// ---------------------------------------------------------------- status & banners
+
+function setStatus(html) { $('status').innerHTML = html; }
+
+function banner(kind, text, action) {
+  const box = $('banner');
+  box.innerHTML = '';
+  if (!text) return;
+  const div = document.createElement('div');
+  div.className = `banner ${kind}`;
+  const span = document.createElement('span');
+  span.textContent = text;
+  div.append(span);
+  if (action) {
+    const b = document.createElement('button');
+    b.textContent = action.label;
+    b.onclick = action.run;
+    div.append(b);
+  }
+  box.append(div);
+}
+
+function updateButtons() {
+  const connected = !!state.client;
+  $('connect').textContent = connected ? 'Disconnect' : 'Connect';
+  $('connect').classList.toggle('primary', !connected);
+  $('demo').hidden = connected;
+  $('reload').disabled = !connected || state.busy;
+  const problem = state.doc && docProblem(state.doc);
+  $('save').disabled = !connected || state.busy || !state.dirty || !!problem;
+  $('save').title = problem || '';
+}
+
+function markDirty() {
+  state.dirty = true;
+  updateButtons();
+  updateMeter();
+}
+
+function updateMeter() {
+  if (!state.doc) return;
+  const size = docSize(state.doc);
+  const items = state.doc.lists.reduce((n, l) => n + l.items.length, 0);
+  const m = $('meter');
+  m.textContent = `${state.doc.lists.length}/${MAX_LISTS} lists · ${items}/${MAX_ITEMS} items · ${size}/${PUT_MAX} bytes`;
+  m.classList.toggle('over', !!docProblem(state.doc));
+}
+
+// ---------------------------------------------------------------- rendering
+
+function el(tag, props = {}, ...children) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...children);
+  return e;
+}
+
+function textInput(value, onChange, placeholder) {
+  const input = el('input', { type: 'text', value, placeholder });
+  input.addEventListener('input', () => { onChange(input.value); markDirty(); });
+  // Clean on blur, so what's shown is what gets saved
+  input.addEventListener('change', () => { input.value = cleanText(input.value); onChange(input.value); updateMeter(); });
+  return input;
+}
+
+function render() {
+  const root = $('lists');
+  root.innerHTML = '';
+  $('toolbar').hidden = $('footer').hidden = !state.doc;
+  if (!state.doc) return;
+  if (!state.doc.lists.length) {
+    root.append(el('p', { className: 'empty', textContent: 'No lists yet.' }));
+  }
+
+  state.doc.lists.forEach((list, li) => {
+    const done = list.items.filter((it) => it.checked).length;
+    const head = el('div', { className: 'list-head' },
+      textInput(list.name, (v) => { list.name = v; }, 'List name'),
+      el('span', { className: 'count', textContent: `${done}/${list.items.length}` }),
+      iconButton('↑', 'Move list up', li > 0, () => move(state.doc.lists, li, -1)),
+      iconButton('↓', 'Move list down', li < state.doc.lists.length - 1, () => move(state.doc.lists, li, 1)),
+      iconButton('Clear done', 'Remove checked items', done > 0, () => {
+        list.items = list.items.filter((it) => !it.checked);
+      }),
+      iconButton('✕', 'Delete list', true, () => {
+        if (list.items.length && !confirm(`Delete "${list.name}" and its ${list.items.length} items?`)) return false;
+        state.doc.lists.splice(li, 1);
+      }),
+    );
+
+    const ul = el('ul');
+    list.items.forEach((it, ii) => {
+      const box = el('input', { type: 'checkbox', checked: it.checked });
+      box.addEventListener('change', () => { it.checked = box.checked; markDirty(); render(); });
+      ul.append(el('li', { className: it.checked ? 'done' : '' },
+        box,
+        textInput(it.text, (v) => { it.text = v; }, 'Item'),
+        iconButton('↑', 'Move up', ii > 0, () => move(list.items, ii, -1)),
+        iconButton('↓', 'Move down', ii < list.items.length - 1, () => move(list.items, ii, 1)),
+        iconButton('✕', 'Delete item', true, () => { list.items.splice(ii, 1); }),
+      ));
+    });
+
+    const addInput = el('input', { type: 'text', placeholder: 'Add an item and press Enter' });
+    const add = () => {
+      const text = cleanText(addInput.value);
+      if (!text) return;
+      list.items.push({ text, checked: false });
+      markDirty();
+      render();
+      // Keep typing into the same list
+      document.querySelectorAll('.list')[li]?.querySelector('.add input')?.focus();
+    };
+    addInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(); });
+
+    root.append(el('section', { className: 'list' }, head, ul,
+      el('div', { className: 'add' }, addInput, el('button', { textContent: 'Add', onclick: add }))));
+  });
+  updateMeter();
+  updateButtons();
+}
+
+function iconButton(label, title, enabled, run) {
+  return el('button', {
+    className: 'icon', textContent: label, title, disabled: !enabled,
+    onclick: () => { if (run() !== false) { markDirty(); render(); } },
+  });
+}
+
+function move(arr, i, delta) {
+  const [x] = arr.splice(i, 1);
+  arr.splice(i + delta, 0, x);
+}
+
+$('add-list').onclick = () => {
+  if (state.doc.lists.length >= MAX_LISTS) return;
+  state.doc.lists.push({ name: 'New list', items: [] });
+  markDirty();
+  render();
+  const heads = document.querySelectorAll('.list-head input');
+  heads[heads.length - 1]?.select();
+};
+
+// ---------------------------------------------------------------- device
+
+async function withBusy(fn) {
+  state.busy = true;
+  updateButtons();
+  try {
+    await fn();
+  } catch (e) {
+    console.error(e);
+    banner('err', e.message || String(e));
+  } finally {
+    state.busy = false;
+    updateButtons();
+  }
+}
+
+async function reload() {
+  await withBusy(async () => {
+    const { doc } = await state.client.get();
+    state.doc = doc;
+    state.deviceRev = doc.rev;
+    state.dirty = false;
+    banner();
+    setStatus(`Connected to <b>${state.device.name}</b> · revision ${doc.rev}`);
+    render();
+  });
+}
+
+async function save() {
+  await withBusy(async () => {
+    try {
+      const rev = await state.client.put(state.doc, state.doc.rev);
+      state.doc.rev = state.deviceRev = rev;
+      state.dirty = false;
+      banner();
+      setStatus(`Connected to <b>${state.device.name}</b> · saved, revision ${rev}`);
+      render();
+    } catch (e) {
+      if (e instanceof PutError && e.code === ERR_CONFLICT) {
+        banner('warn', 'The lists were changed on the reader since you loaded them. Reload to get them; your edits here will be lost.',
+               { label: 'Reload', run: reload });
+        return;
+      }
+      throw e;
+    }
+  });
+}
+
+function onDeviceChanged(rev) {
+  state.deviceRev = rev;
+  if (!state.dirty && !state.busy) {
+    reload();
+  } else {
+    banner('warn', 'Items were checked on the reader. Reload to see them (unsaved edits here will be lost), or keep editing and save to overwrite.',
+           { label: 'Reload', run: reload });
+  }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    banner('err', window.isSecureContext
+      ? 'This browser has no Web Bluetooth. Use Chrome or Edge on desktop.'
+      : 'Web Bluetooth needs a secure page: serve this folder and open it via http://localhost (see README).');
+    return;
+  }
+  await withBusy(async () => {
+    setStatus('Choose the reader in the browser dialog...');
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: DEVICE_NAME }], optionalServices: [SERVICE_UUID],
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    setStatus(`Connecting to <b>${device.name}</b>...`);
+    const server = await device.gatt.connect();
+    let chr;
+    try {
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      chr = await service.getCharacteristic(DATA_UUID);
+    } catch {
+      device.gatt.disconnect();
+      throw new Error('The reader has no Lists service - update its firmware.');
+    }
+    const client = new ListsClient((bytes) => chr.writeValueWithResponse(bytes));
+    client.onChanged = onDeviceChanged;
+    chr.addEventListener('characteristicvaluechanged', (e) => {
+      const v = e.target.value;
+      try {
+        client.onNotify(new Uint8Array(v.buffer, v.byteOffset, v.byteLength).slice());
+      } catch (err) {
+        console.warn(err);
+      }
+    });
+    await chr.startNotifications();
+    state.device = device;
+    state.client = client;
+    state.demo = false;
+  });
+  if (state.client) await reload();
+}
+
+function onDisconnected() {
+  state.client = null;
+  setStatus(state.doc ? 'Disconnected - edits are kept, connect again to save' : 'Not connected');
+  updateButtons();
+}
+
+$('connect').onclick = () => {
+  if (state.client) {
+    state.device?.gatt.disconnect();
+  } else {
+    connect();
+  }
+};
+$('reload').onclick = () => {
+  if (state.dirty && !confirm('Discard your unsaved edits and reload from the reader?')) return;
+  reload();
+};
+$('save').onclick = save;
+$('demo').onclick = () => {
+  state.demo = true;
+  state.doc = parseDoc(DEMO_DOC);
+  state.dirty = false;
+  setStatus('Demo - not connected, nothing is saved');
+  banner();
+  render();
+};
+window.addEventListener('beforeunload', (e) => { if (state.dirty) e.preventDefault(); });
+
+updateButtons();
+</script>
+</body>
+</html>

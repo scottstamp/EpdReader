@@ -10,6 +10,8 @@
 #include "storage.h"
 #include "buttons.h"
 #include "ble_upload.h"
+#include "lists.h"
+#include "lists_ble.h"
 #include "battery.h"
 #include "epub.h"
 #include "prefs.h"
@@ -30,7 +32,9 @@ typedef enum {
     STATE_STATS,
     STATE_BLE_UPLOAD,
     STATE_USB_STORAGE,
-    STATE_TRANSFER
+    STATE_TRANSFER,
+    STATE_LISTS,
+    STATE_LIST_ITEMS
 } SystemState;
 
 static SystemState current_state = STATE_MENU;
@@ -76,6 +80,7 @@ static uint32_t session_start_ms = 0;
 typedef enum {
     HOME_CONTINUE,
     HOME_LIBRARY,
+    HOME_LISTS,
     HOME_SETTINGS,
     HOME_TRANSFER,
     HOME_STATS,
@@ -389,6 +394,100 @@ static void ble_upload_exit(void) {
     }
 }
 
+// Lists: Bluetooth sync runs while either lists screen is open; the reader's scan buffer
+// is lent as the staging area for incoming documents, so every way out goes through lists_exit()
+#define LISTS_POLL_MS 300
+static bool lists_active = false;
+static bool lists_shown_connected = false;
+static int selected_list_idx = 0;   // == list_count selects "[Back]"
+static int open_list_idx = 0;
+static int selected_item_idx = 0;   // == item_count: "Clear checked", +1: "[Back]"
+
+static void lists_enter(void) {
+    lists_load();
+    selected_list_idx = 0;
+    lists_active = (lists_ble_start((uint8_t *)scan_buf, sizeof(scan_buf)) == 0);
+}
+
+static void lists_exit(void) {
+    if (lists_active) {
+        lists_ble_stop();
+        lists_active = false;
+    }
+}
+
+static bool in_lists_screens(void) {
+    return current_state == STATE_LISTS || current_state == STATE_LIST_ITEMS;
+}
+
+static const char *lists_footer(void) {
+    lists_shown_connected = lists_active && lists_ble_connected();
+    if (!lists_active) return "Bluetooth unavailable";
+    return lists_shown_connected ? "Bluetooth: browser connected" : "Edit in a browser over Bluetooth";
+}
+
+static void render_lists(void) {
+    const ListsDoc *doc = lists_get();
+    int count = doc->list_count;
+    int first, visible;
+    display_menu_window(count + 1, selected_list_idx, &first, &visible);
+
+    // Labels only for the rows on screen
+    char labels[DISPLAY_MENU_ROWS][64];
+    const char *options[LISTS_MAX_LISTS + 1];
+    for (int i = 0; i <= count; i++) options[i] = "";
+    for (int i = first; i < first + visible && i < count; i++) {
+        const ListsList *l = &doc->lists[i];
+        int done = 0;
+        for (int k = 0; k < l->item_count; k++) done += doc->items[l->first_item + k].checked;
+        snprintf(labels[i - first], sizeof(labels[0]), "%.*s  (%d/%d)", l->name_len,
+                 doc->text + l->name_off, done, l->item_count);
+        options[i] = labels[i - first];
+    }
+    options[count] = "[Back]";
+    display_draw_menu_ext("Lists", lists_footer(), options, count + 1, selected_list_idx);
+}
+
+static void render_list_items(void) {
+    const ListsDoc *doc = lists_get();
+    const ListsList *l = &doc->lists[open_list_idx];
+    int count = l->item_count;
+    int first, visible;
+    display_menu_window(count + 2, selected_item_idx, &first, &visible);
+
+    char labels[DISPLAY_MENU_ROWS][LISTS_TEXT_MAX + 8];
+    const char *options[LISTS_MAX_ITEMS + 2];
+    for (int i = 0; i < count + 2; i++) options[i] = "";
+    int done = 0;
+    for (int k = 0; k < count; k++) done += doc->items[l->first_item + k].checked;
+    for (int i = first; i < first + visible && i < count; i++) {
+        const ListsItem *it = &doc->items[l->first_item + i];
+        snprintf(labels[i - first], sizeof(labels[0]), "%s %.*s", it->checked ? "[x]" : "[  ]",
+                 it->text_len, doc->text + it->line_off + 4);
+        options[i] = labels[i - first];
+    }
+    options[count] = "Clear checked";
+    options[count + 1] = "[Back]";
+
+    char title[LISTS_TEXT_MAX + 16];
+    snprintf(title, sizeof(title), "%.*s (%d/%d)", l->name_len, doc->text + l->name_off, done, count);
+    display_draw_menu_ext(title, lists_footer(), options, count + 2, selected_item_idx);
+}
+
+// After the lists were replaced from a browser, keep the selection on something that exists
+static void lists_clamp_selection(void) {
+    const ListsDoc *doc = lists_get();
+    if (selected_list_idx > doc->list_count) selected_list_idx = doc->list_count;
+    if (current_state == STATE_LIST_ITEMS) {
+        if (open_list_idx >= doc->list_count) {
+            current_state = STATE_LISTS;
+            selected_list_idx = doc->list_count ? doc->list_count - 1 : 0;
+        } else if (selected_item_idx > doc->lists[open_list_idx].item_count + 1) {
+            selected_item_idx = doc->lists[open_list_idx].item_count + 1;
+        }
+    }
+}
+
 static int ble_upload_percent(const BleUploadStatus *st) {
     return st->size ? (int)(((uint64_t)st->received * 100) / st->size) : 0;
 }
@@ -479,6 +578,7 @@ static void render_home(void) {
     const CarouselItem items[HOME_COUNT] = {
         [HOME_CONTINUE] = { &icon_continue_large, &icon_continue_small, "Continue", continue_detail },
         [HOME_LIBRARY]  = { &icon_library_large, &icon_library_small, "Library", "Books on the SD card" },
+        [HOME_LISTS]    = { &icon_lists_large, &icon_lists_small, "Lists", "To-do and grocery lists" },
         [HOME_SETTINGS] = { &icon_settings_large, &icon_settings_small, "Settings", "Text, display, firmware" },
         [HOME_TRANSFER] = { &icon_transfer_large, &icon_transfer_small, "Transfer", "USB drive or Bluetooth" },
         [HOME_STATS]    = { &icon_stats_large, &icon_stats_small, "Stats", stats_detail },
@@ -706,6 +806,14 @@ static void render_current_state(void) {
             render_ble_upload();
             break;
 
+        case STATE_LISTS:
+            render_lists();
+            break;
+
+        case STATE_LIST_ITEMS:
+            render_list_items();
+            break;
+
         case STATE_TRANSFER: {
             const char *options[TRANSFER_COUNT] = {
                 [TRANSFER_USB] = "USB drive (SD card)",
@@ -869,6 +977,9 @@ int main(void) {
         if (current_state == STATE_BLE_UPLOAD && (timeout_ms < 0 || timeout_ms > BLE_UPLOAD_POLL_MS)) {
             timeout_ms = BLE_UPLOAD_POLL_MS;
         }
+        if (in_lists_screens() && lists_active && (timeout_ms < 0 || timeout_ms > LISTS_POLL_MS)) {
+            timeout_ms = LISTS_POLL_MS;
+        }
 
         ButtonEvent evt = buttons_wait(timeout_ms);
         if (evt != BTN_EVENT_NONE) {
@@ -910,6 +1021,13 @@ int main(void) {
                 } else if (current_state == STATE_TRANSFER) {
                     selected_transfer_idx = wrap_index(selected_transfer_idx, step, TRANSFER_COUNT);
                     render_current_state();
+                } else if (current_state == STATE_LISTS) {
+                    selected_list_idx = wrap_index(selected_list_idx, step, lists_get()->list_count + 1);
+                    render_current_state();
+                } else if (current_state == STATE_LIST_ITEMS) {
+                    int rows = lists_get()->lists[open_list_idx].item_count + 2;
+                    selected_item_idx = wrap_index(selected_item_idx, step, rows);
+                    render_current_state();
                 } else if (current_state == STATE_REFRESH_SETTINGS) {
                     int max_opts = (display_get_refresh_profile() == GDEY037T03_PROFILE_CUSTOM) ? 5 : 2;
                     selected_refresh_menu_idx = wrap_index(selected_refresh_menu_idx, step, max_opts);
@@ -932,6 +1050,10 @@ int main(void) {
                         case HOME_LIBRARY:
                             load_library();
                             current_state = STATE_BOOK_LIST;
+                            break;
+                        case HOME_LISTS:
+                            lists_enter();
+                            current_state = STATE_LISTS;
                             break;
                         case HOME_SETTINGS:
                             settings_return_state = STATE_MENU;
@@ -1060,6 +1182,32 @@ int main(void) {
                     }
                     save_prefs();
                     render_current_state();
+                } else if (current_state == STATE_LISTS) {
+                    if (selected_list_idx < lists_get()->list_count) {
+                        open_list_idx = selected_list_idx;
+                        selected_item_idx = 0;
+                        current_state = STATE_LIST_ITEMS;
+                    } else {
+                        lists_exit();
+                        current_state = STATE_MENU;
+                    }
+                    render_current_state();
+                } else if (current_state == STATE_LIST_ITEMS) {
+                    const ListsList *l = &lists_get()->lists[open_list_idx];
+                    if (selected_item_idx < l->item_count) {
+                        if (lists_toggle(l->first_item + selected_item_idx) == LISTS_OK) {
+                            lists_ble_notify_changed();
+                        }
+                    } else if (selected_item_idx == l->item_count) {
+                        if (lists_clear_checked(open_list_idx) == LISTS_OK) {
+                            lists_ble_notify_changed();
+                        }
+                        selected_item_idx = 0;
+                    } else {
+                        selected_list_idx = open_list_idx;
+                        current_state = STATE_LISTS;
+                    }
+                    render_current_state();
                 } else if (current_state == STATE_TRANSFER) {
                     switch ((TransferItem)selected_transfer_idx) {
                         case TRANSFER_USB:
@@ -1092,7 +1240,8 @@ int main(void) {
                 if (current_state == STATE_READER || current_state == STATE_READER_MENU ||
                     current_state == STATE_SETTINGS || current_state == STATE_REFRESH_SETTINGS ||
                     current_state == STATE_BOOK_LIST || current_state == STATE_CHAPTER_LIST ||
-                    current_state == STATE_TRANSFER) {
+                    current_state == STATE_TRANSFER || in_lists_screens()) {
+                    lists_exit();
                     current_state = STATE_MENU;
                     render_current_state();
                 } else {
@@ -1133,12 +1282,26 @@ int main(void) {
             }
         }
 
+        if (in_lists_screens() && lists_active) {
+            bool redraw = lists_ble_poll();
+            if (redraw) {
+                lists_clamp_selection();
+            }
+            if (lists_ble_connected()) {
+                last_activity_time = k_uptime_get_32(); // no auto-sleep while a browser is linked
+            }
+            if (redraw || lists_ble_connected() != lists_shown_connected) {
+                render_current_state();
+            }
+        }
+
         if (current_state == STATE_USB_STORAGE) {
             last_activity_time = k_uptime_get_32(); // no auto-sleep while the computer has the card
         } else if (k_uptime_get_32() - last_activity_time >= AUTO_SLEEP_MS) {
             if (current_state == STATE_BLE_UPLOAD) {
                 ble_upload_exit();
             }
+            lists_exit();
             pre_sleep_state = current_state;
             current_state = STATE_LOCKSCREEN;
             render_current_state();

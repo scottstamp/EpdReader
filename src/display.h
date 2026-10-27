@@ -63,6 +63,11 @@ void display_draw_icon(int x, int y, const Icon *icon, uint8_t color);
 // Main menu: focused item centred with its neighbours either side; Prev/Next rotate
 void display_draw_carousel(const CarouselItem *items, int count, int selected);
 void display_draw_menu(const char *header, const char **options, int count, int selected_idx);
+// Menus show this many rows and scroll to keep the selection visible
+#define DISPLAY_MENU_ROWS 10
+// Which options a menu of count entries shows for selected_idx, so callers can build
+// labels for the visible rows only
+void display_menu_window(int count, int selected_idx, int *first, int *visible);
 void display_draw_menu_ext(const char *header, const char *sub_footer, const char **options, int count, int selected_idx);
 void display_draw_message(const char *title, const char *msg, bool is_alert);
 void display_draw_progress(const char *task, int percentage);
