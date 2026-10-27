@@ -26,8 +26,8 @@ int gdey037t03_get_refresh_config(const struct device *dev, struct gdey037t03_re
     (void)dev; cfg->profile = GDEY037T03_PROFILE_NORMAL; cfg->pulse_interval = 2; cfg->pulse_count = 3; cfg->frame_rate = 0; return 0;
 }
 uint8_t battery_get_percentage(void) { return 85; }
-// The lock screen gets a cover when UI_PREVIEW_COVER names a raw 8-bit grayscale file of the
-// requested size (e.g. a .cov cache file from the SD card)
+// The lock screen gets a cover when UI_PREVIEW_COVER names an 8-bit grayscale file of the
+// requested size: a .cov cache file from the SD card, or a raw dump
 static EpubBook preview_book;
 const EpubBook *storage_get_epub(const char *n) { (void)n; return getenv("UI_PREVIEW_COVER") ? &preview_book : NULL; }
 bool epub_extract_cover_image(const EpubBook *b, uint8_t *g, int w, int h) {
@@ -35,6 +35,13 @@ bool epub_extract_cover_image(const EpubBook *b, uint8_t *g, int w, int h) {
     const char *path = getenv("UI_PREVIEW_COVER");
     FILE *f = path ? fopen(path, "rb") : NULL;
     if (!f) return false;
+    // .cov files from the firmware start with an 8-byte "COV2" header; raw dumps don't
+    char magic[4];
+    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "COV2", 4) == 0) {
+        fseek(f, 8, SEEK_SET);
+    } else {
+        fseek(f, 0, SEEK_SET);
+    }
     size_t got = fread(g, 1, (size_t)w * h, f);
     fclose(f);
     return got == (size_t)w * h;

@@ -988,26 +988,70 @@ static bool inflate_cover_to_tmp(struct fs_file_t *src, const EpubCoverInfo *cov
     return err == 0;
 }
 
+// .cov sidecar: header + target_w*target_h grayscale bytes, or a header with 0x0 size meaning
+// "this book's cover can't be decoded" so the slow path isn't retried on every lock screen.
+// Older firmware wrote headerless files (noise from a fake decoder); those are discarded.
+#define COVER_CACHE_MAGIC 0x32564F43u  /* "COV2" */
+
+typedef struct {
+    uint32_t magic;
+    uint16_t width;
+    uint16_t height;
+} CoverCacheHeader;
+
+static void save_cover_cache(const char *cov_path, const uint8_t *gray, int w, int h) {
+    struct fs_file_t out_file;
+    fs_file_t_init(&out_file);
+    int res = fs_open(&out_file, cov_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+    if (res != 0) {
+        LOG_ERR("Failed to create cover cache bitmap: %s (err %d)", cov_path, res);
+        return;
+    }
+    CoverCacheHeader hdr = { .magic = COVER_CACHE_MAGIC, .width = (uint16_t)w, .height = (uint16_t)h };
+    fs_write(&out_file, &hdr, sizeof(hdr));
+    if (gray) {
+        fs_write(&out_file, gray, (size_t)w * h);
+    }
+    fs_close(&out_file);
+    LOG_INF("Saved cover cache: %s (%dx%d)", cov_path, w, h);
+}
+
+// Returns 1 = cover loaded, 0 = cached "no cover", -1 = no usable cache
+static int load_cover_cache(const char *cov_path, uint8_t *gray_out, int w, int h) {
+    struct fs_file_t cov_file;
+    fs_file_t_init(&cov_file);
+    if (fs_open(&cov_file, cov_path, FS_O_READ) != 0) {
+        return -1;
+    }
+    CoverCacheHeader hdr;
+    int result = -1;
+    if (fs_read(&cov_file, &hdr, sizeof(hdr)) == (ssize_t)sizeof(hdr) && hdr.magic == COVER_CACHE_MAGIC) {
+        if (hdr.width == 0 && hdr.height == 0) {
+            result = 0;
+        } else if (hdr.width == w && hdr.height == h &&
+                   fs_read(&cov_file, gray_out, (size_t)w * h) == (ssize_t)((size_t)w * h)) {
+            result = 1;
+        }
+    }
+    fs_close(&cov_file);
+    if (result < 0) {
+        LOG_INF("Discarding stale cover cache: %s", cov_path);
+        fs_unlink(cov_path);
+    }
+    return result;
+}
+
 bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int target_w, int target_h) {
     if (!book || !gray_out || target_w <= 0 || target_h <= 0) return false;
 
-    /* 1. Fast Path: Check if pre-rendered 145x210 cover bitmap cache (.cov) exists on SD card */
+    /* 1. Fast Path: pre-rendered cover bitmap (or a cached "no cover") on the SD card */
     char cov_path[256];
     build_sidecar_path(book->book_path, "cov", cov_path, sizeof(cov_path));
 
-    struct fs_dirent cov_stat;
-    if (fs_stat(cov_path, &cov_stat) == 0) {
-        struct fs_file_t cov_file;
-        fs_file_t_init(&cov_file);
-        if (fs_open(&cov_file, cov_path, FS_O_READ) == 0) {
-            size_t expected_bytes = (size_t)(target_w * target_h);
-            ssize_t read_bytes = fs_read(&cov_file, gray_out, expected_bytes);
-            fs_close(&cov_file);
-            if (read_bytes == (ssize_t)expected_bytes) {
-                LOG_INF("Instant cover load from cache: %s (%u bytes)", cov_path, (uint32_t)read_bytes);
-                return true;
-            }
-        }
+    int cached = load_cover_cache(cov_path, gray_out, target_w, target_h);
+    if (cached >= 0) {
+        LOG_INF("Cover from cache: %s (%s)", cov_path, cached ? "image" : "none");
+        return cached == 1;
     }
 
     /* 2. Slow Path: decode the cover JPEG straight from the EPUB (or an inflated temp copy) */
@@ -1017,11 +1061,13 @@ bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int targe
     }
     if (my_strcasestr(book->cover.cover_path, ".png") != NULL) {
         LOG_INF("PNG cover not supported: %s", book->cover.cover_path);
+        save_cover_cache(cov_path, NULL, 0, 0);
         return false;
     }
     uint16_t comp_method = book->cover.compression_method;
     if (comp_method != 0 && comp_method != 8) {
         LOG_WRN("Unsupported cover compression %u: %s", comp_method, book->cover.cover_path);
+        save_cover_cache(cov_path, NULL, 0, 0);
         return false;
     }
 
@@ -1054,21 +1100,11 @@ bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int targe
         }
         fs_unlink(COVER_TMP_PATH);
     }
-    if (!ok) {
-        return false;
-    }
-
-    /* 3. Save the 145x210 cover bitmap to the SD sidecar cache (.cov) for instant future loads */
-    struct fs_file_t out_file;
-    fs_file_t_init(&out_file);
-    int res = fs_open(&out_file, cov_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
-    if (res == 0) {
-        fs_write(&out_file, gray_out, target_w * target_h);
-        fs_close(&out_file);
-        LOG_INF("Saved cover cache bitmap: %s", cov_path);
+    /* 3. Cache the result (bitmap, or "no cover" for e.g. progressive JPEGs) for future lock screens */
+    if (ok) {
+        save_cover_cache(cov_path, gray_out, target_w, target_h);
     } else {
-        LOG_ERR("Failed to create cover cache bitmap: %s (err %d)", cov_path, res);
+        save_cover_cache(cov_path, NULL, 0, 0);
     }
-
-    return true;
+    return ok;
 }

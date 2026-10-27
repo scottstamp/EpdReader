@@ -23,7 +23,7 @@
 #define MAX_CHAPTERS 100
 #define HISTORY_SIZE 64
 #define AUTO_SLEEP_MS 300000 // 5 minutes inactivity timeout
-#define EPD_FULL_REFRESH_INTERVAL 20
+#define EPD_FULL_REFRESH_INTERVAL 60 // partial refreshes between ghost-clearing full refreshes
 
 // Path mountpoints
 #define SD_MOUNT_POINT "/SD:"
