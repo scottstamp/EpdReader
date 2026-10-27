@@ -39,6 +39,8 @@ bool font_sd_load(const char *font_path);
 void font_sd_unload(void);
 bool font_sd_is_active(void);
 int font_sd_line_height(void);
+// SD glyph yOffsets are measured down from the line top, not up from the baseline
+int font_sd_ascent(void);
 
 // Pass font == NULL to look up the loaded SD font, otherwise the built-in font is used.
 // *has_style is set when the glyph already carries the requested bold/italic style

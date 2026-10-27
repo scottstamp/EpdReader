@@ -10,6 +10,12 @@ Usage:
   python tools/ui_preview/preview.py              # writes PNGs to tools/ui_preview/out
   python tools/ui_preview/preview.py --cc clang   # pick a different C compiler
   python tools/ui_preview/preview.py --scale 3
+  python tools/ui_preview/preview.py --books ../books/*.epub   # also convert + paginate books
+
+Reader pages use fonts/Arial.fnt as the SD font (loaded through stdio-backed fs stubs).
+The run fails if a layout self-check fails (measure != draw, or a page break splitting a
+UTF-8 sequence). --books converts each EPUB with src/html_text.c (book_text.c) and pages
+through the whole text in every reader font.
 
 To preview another screen, add a draw call + dump() to ui_preview.c.
 Needs a host C compiler (gcc or clang); no Python packages.
@@ -66,6 +72,7 @@ def main():
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"), help="host C compiler (default: gcc)")
     parser.add_argument("--out", default=os.path.join(HERE, "out"), help="output directory for PNGs")
     parser.add_argument("--scale", type=int, default=2, help="pixel scale factor")
+    parser.add_argument("--books", nargs="*", default=[], help="EPUB files to convert and paginate")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -82,12 +89,30 @@ def main():
             "-o", exe,
         ]
         subprocess.run(cmd, check=True)
-        subprocess.run([exe, tmp], check=True)
+        # The stdio fs stubs resolve /SD:/ against the repo, so fonts/Arial.fnt loads as the SD font
+        env = dict(os.environ, UI_PREVIEW_SD_ROOT=REPO)
+        # A non-zero exit means a layout self-check failed; still write the PNGs to inspect
+        texts = []
+        if args.books:
+            conv = os.path.join(tmp, "book_text.exe" if os.name == "nt" else "book_text")
+            subprocess.run([
+                args.cc, "-O1", "-Wall", "-I", os.path.join(REPO, "src"),
+                os.path.join(HERE, "book_text.c"),
+                os.path.join(REPO, "src", "html_text.c"),
+                os.path.join(REPO, "src", "inflate_stream.c"),
+                "-o", conv,
+            ], check=True)
+            for i, book in enumerate(args.books):
+                txt = os.path.join(args.out, "book%d.txt" % (i + 1))
+                subprocess.run([conv, book, txt], check=True)
+                texts.append(txt)
+        status = subprocess.run([exe, tmp] + texts, env=env).returncode
 
         for pbm in sorted(glob.glob(os.path.join(tmp, "*.pbm"))):
             name = os.path.splitext(os.path.basename(pbm))[0] + ".png"
             write_png(os.path.join(args.out, name), framed(read_pbm(pbm), args.scale))
             print("wrote", os.path.join(args.out, name))
+        return status
 
 
 if __name__ == "__main__":

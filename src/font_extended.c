@@ -145,6 +145,10 @@ int font_sd_line_height(void) {
     return s_sd_font_loaded ? s_font_hdr.line_height : 0;
 }
 
+int font_sd_ascent(void) {
+    return s_sd_font_loaded ? s_font_hdr.ascent : 0;
+}
+
 static const SdGlyph *font_sd_find(uint32_t key) {
     int low = 0, high = (int)s_glyph_count - 1;
     while (low <= high) {

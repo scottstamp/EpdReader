@@ -284,7 +284,7 @@ static bool parse_opf_spine_order(const char *opf_buf, EpubBook *book)
 }
 
 #define EPUB_CACHE_MAGIC   0x45505542u  /* "EPUB" */
-#define EPUB_CACHE_VERSION 8u  /* v8: offsets point into the converted .txt */
+#define EPUB_CACHE_VERSION 9u  /* v9: typographic punctuation kept as UTF-8 */
 
 typedef struct {
     uint32_t magic;

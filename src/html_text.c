@@ -85,11 +85,8 @@ static void put_utf8(HtmlText *h, uint32_t cp) {
 }
 
 static void put_codepoint(HtmlText *h, uint32_t cp) {
-    // Keep common typography as ASCII; the 8-bit fonts render these directly
-    if (cp == 0x201C || cp == 0x201D) put_char(h, '"');
-    else if (cp == 0x2018 || cp == 0x2019) put_char(h, '\'');
-    else if (cp == 0x2014 || cp == 0x2013) put_char(h, '-');
-    else if (cp == 160 || cp == 9 || cp == 10 || cp == 13 || cp == 32) {
+    // Typography stays real UTF-8; the display falls back to ASCII per font
+    if (cp == 160 || cp == 9 || cp == 10 || cp == 13 || cp == 32) {
         if (h->last != 0 && h->last != '\n') h->pending_space = true;
     }
     else if (cp >= 32) put_utf8(h, cp);
@@ -239,9 +236,7 @@ static void process_entity(HtmlText *h) {
         }
     }
 
-    if (cp == 0x2026) {
-        put_str(h, "...");
-    } else if (cp != 0) {
+    if (cp != 0) {
         put_codepoint(h, cp);
     } else {
         // Unknown entity: keep the source text

@@ -361,7 +361,10 @@ void display_draw_line(int x0, int y0, int x1, int y1, uint8_t color) {
     }
 }
 
-static uint8_t decode_utf8_char(const char **pp) {
+// Next codepoint of a NUL-terminated UTF-8 string, or 0 at its end (a sequence cut short
+// by the end also counts as the end, so it is never half consumed). Malformed bytes are
+// skipped one at a time as U+FFFD.
+static uint32_t utf8_next(const char **pp) {
     const uint8_t *p = (const uint8_t *)*pp;
     if (!*p) return 0;
 
@@ -369,8 +372,8 @@ static uint8_t decode_utf8_char(const char **pp) {
     int bytes = 0;
 
     if ((*p & 0x80) == 0x00) {
-        cp = *p;
-        bytes = 1;
+        (*pp)++;
+        return *p;
     } else if ((*p & 0xE0) == 0xC0) {
         cp = *p & 0x1F;
         bytes = 2;
@@ -382,24 +385,53 @@ static uint8_t decode_utf8_char(const char **pp) {
         bytes = 4;
     } else {
         (*pp)++;
-        return ' ';
+        return 0xFFFD;
     }
 
     for (int i = 1; i < bytes; i++) {
+        if (p[i] == 0) return 0;
         if ((p[i] & 0xC0) != 0x80) {
             *pp += i;
-            return ' ';
+            return 0xFFFD;
         }
         cp = (cp << 6) | (p[i] & 0x3F);
     }
 
     *pp += bytes;
+    return cp;
+}
 
+// End of the complete UTF-8 text in s: a multi-byte sequence truncated by the end of the
+// buffer is left out, so page offsets never land inside a character.
+static const char *utf8_text_end(const char *s) {
+    size_t len = strlen(s);
+    size_t i = len;
+    size_t tail = 0;
+    while (i > 0 && tail < 3 && ((uint8_t)s[i - 1] & 0xC0) == 0x80) {
+        i--;
+        tail++;
+    }
+    if (i > 0) {
+        uint8_t lead = (uint8_t)s[i - 1];
+        size_t need = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : (lead >= 0xC0) ? 2 : 1;
+        if (need > tail + 1) return s + i - 1;
+    }
+    return s + len;
+}
+
+// Format characters that take no space (soft hyphen, zero-width space/joiners, bidi marks, BOM)
+static bool is_invisible_cp(uint32_t cp) {
+    return cp == 0x00AD || (cp >= 0x200B && cp <= 0x200F) || (cp >= 0x202A && cp <= 0x202E) ||
+           (cp >= 0x2060 && cp <= 0x2064) || cp == 0xFEFF;
+}
+
+// Single ASCII stand-in for a codepoint the font can't draw
+static char ascii_fallback_char(uint32_t cp) {
     // 1. Direct ASCII
-    if (cp >= 32 && cp <= 126) return (uint8_t)cp;
+    if (cp >= 32 && cp <= 126) return (char)cp;
 
-    // 2. Spaces & Control Breaks
-    if (cp == 160 || cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0x202F || cp == 0xFEFF) return ' ';
+    // 2. Spaces & Line Breaks
+    if (cp == 160 || cp == 0x202F || cp == 0x2028 || cp == 0x2029) return ' ';
 
     // 3. Quotes & Punctuation
     if (cp == 0x201C || cp == 0x201D || cp == 0x201E || cp == 0x201F || cp == 0x00AB || cp == 0x00BB) return '"';
@@ -469,18 +501,59 @@ static uint8_t decode_utf8_char(const char **pp) {
     if (cp == 0x00FD || cp == 0x00FF || cp == 0x0177) return 'y';
     if (cp >= 0x0179 && cp <= 0x017E) return (cp % 2 == 1) ? 'Z' : 'z';
 
-    // Ligatures & Currency
-    if (cp >= 0xFB00 && cp <= 0xFB04) return 'f';
-    if (cp == 0x00A9) return 'C';
-    if (cp == 0x00AE) return 'R';
-    if (cp == 0x2122) return 'T';
+    // Symbols & Currency
     if (cp == 0x00B0) return 'o';
-    if (cp == 0x20AC || cp == 0x00A3 || cp == 0x00A5 || cp == 0x00A2) return '$';
+    if (cp == 0x00A3 || cp == 0x00A5 || cp == 0x00A2) return '$';
 
     return ' ';
 }
 
-static int display_draw_gfx_char_styled(int x, int y, uint8_t c, const GFXfont *font, uint8_t color, bool is_italic, bool is_bold, bool is_underline) {
+// ASCII stand-in for cp, up to 3 characters; returns the count
+static int ascii_fallback(uint32_t cp, char out[3]) {
+    const char *multi = NULL;
+    switch (cp) {
+    case 0x2026: multi = "..."; break;
+    case 0x00C6: multi = "AE"; break;
+    case 0x00E6: multi = "ae"; break;
+    case 0x0152: multi = "OE"; break;
+    case 0x0153: multi = "oe"; break;
+    case 0x00DF: multi = "ss"; break;
+    case 0x00A9: multi = "(c)"; break;
+    case 0x00AE: multi = "(R)"; break;
+    case 0x2122: multi = "TM"; break;
+    case 0x20AC: multi = "EUR"; break;
+    case 0xFB00: multi = "ff"; break;
+    case 0xFB01: multi = "fi"; break;
+    case 0xFB02: multi = "fl"; break;
+    case 0xFB03: multi = "ffi"; break;
+    case 0xFB04: multi = "ffl"; break;
+    default: break;
+    }
+    if (multi) {
+        int n = (int)strlen(multi);
+        memcpy(out, multi, n);
+        return n;
+    }
+    out[0] = ascii_fallback_char(cp);
+    return 1;
+}
+
+// Glyphs that show cp in font (NULL: SD font): its own glyph when the SD font has one,
+// otherwise the ASCII stand-in. Returns the glyph count (0: invisible). Layout and drawing
+// both resolve through here, so measured and drawn lines always agree.
+static int resolve_glyphs(const GFXfont *font, uint32_t cp, uint32_t out[3]) {
+    if (cp < 0x20 || is_invisible_cp(cp)) return 0;
+    if (cp <= 0x7E || (font == NULL && font_get_glyph(cp, NULL, NULL) != NULL)) {
+        out[0] = cp;
+        return 1;
+    }
+    char ascii[3];
+    int n = ascii_fallback(cp, ascii);
+    for (int i = 0; i < n; i++) out[i] = (uint8_t)ascii[i];
+    return n;
+}
+
+static int display_draw_gfx_char_styled(int x, int y, uint32_t c, const GFXfont *font, uint8_t color, bool is_italic, bool is_bold, bool is_underline) {
     if (c < 32) return 0;
 
     const uint8_t *bitmap = NULL;
@@ -528,7 +601,8 @@ static int display_draw_gfx_char_styled(int x, int y, uint8_t c, const GFXfont *
     }
 
     if (is_underline) {
-        int ul_y = y + 2;
+        // y is the baseline for built-in fonts but the line top for SD fonts
+        int ul_y = font ? y + 2 : y + font_sd_ascent() + 1;
         int adv = glyph->xAdvance;
         for (int ix = 0; ix < adv; ix++) {
             display_draw_pixel(x + ix, ul_y, color);
@@ -538,32 +612,35 @@ static int display_draw_gfx_char_styled(int x, int y, uint8_t c, const GFXfont *
     return glyph->xAdvance + (is_bold ? 1 : 0);
 }
 
-static int display_draw_gfx_string_styled(int x, int y, const uint8_t *str, int len, const GFXfont *font, uint8_t color, bool *in_italic, bool *in_bold, bool *in_underline) {
+// Draws len bytes of UTF-8 text with inline style codes, NUL-terminated at str[len]
+static int display_draw_gfx_string_styled(int x, int y, const char *str, int len, const GFXfont *font, uint8_t color, bool *in_italic, bool *in_bold, bool *in_underline) {
     int cur_x = x;
-    for (int i = 0; i < len; i++) {
-        uint8_t c = str[i];
-        if (c == '\x0E') { *in_italic = true; continue; }
-        if (c == '\x0F') { *in_italic = false; continue; }
-        if (c == '\x02') { *in_bold = true; continue; }
-        if (c == '\x03') { *in_bold = false; continue; }
-        if (c == '\x15') { *in_underline = true; continue; }
-        if (c == '\x16') { *in_underline = false; continue; }
-        if (c == '\x1C') { continue; }
+    const char *p = str;
+    const char *end = str + len;
+    while (p < end) {
+        uint32_t cp = utf8_next(&p);
+        if (cp == 0) break;
+        if (cp == '\x0E') { *in_italic = true; continue; }
+        if (cp == '\x0F') { *in_italic = false; continue; }
+        if (cp == '\x02') { *in_bold = true; continue; }
+        if (cp == '\x03') { *in_bold = false; continue; }
+        if (cp == '\x15') { *in_underline = true; continue; }
+        if (cp == '\x16') { *in_underline = false; continue; }
 
-        cur_x += display_draw_gfx_char_styled(cur_x, y, c, font, color, *in_italic, *in_bold, *in_underline);
+        uint32_t glyphs[3];
+        int n = resolve_glyphs(font, cp, glyphs);
+        for (int i = 0; i < n; i++) {
+            cur_x += display_draw_gfx_char_styled(cur_x, y, glyphs[i], font, color, *in_italic, *in_bold, *in_underline);
+        }
     }
     return cur_x - x;
 }
 
+// Draws text already reduced to ASCII by fit_text
 static int display_draw_gfx_string_raw(int x, int y, const char *str, const GFXfont *font, uint8_t color) {
     int cur_x = x;
-    const char *p = str;
-    bool it = false, bd = false, ul = false;
-
-    while (*p) {
-        uint8_t c = decode_utf8_char(&p);
-        if (c == 0) break;
-        cur_x += display_draw_gfx_char_styled(cur_x, y, c, font, color, it, bd, ul);
+    for (const char *p = str; *p; p++) {
+        cur_x += display_draw_gfx_char_styled(cur_x, y, (uint8_t)*p, font, color, false, false, false);
     }
     return cur_x - x;
 }
@@ -573,16 +650,23 @@ static int builtin_advance(const GFXfont *font, uint8_t c) {
     return font->glyph[glyph_idx].xAdvance;
 }
 
-// Decodes str into out (single-byte glyph codes), shortening it with "..." to fit
-// max_width. Returns the resulting width in pixels.
+// Decodes str into out as ASCII (built-in fonts have no other glyphs), shortening it
+// with "..." to fit max_width. Returns the resulting width in pixels.
 static int fit_text(const char *str, const GFXfont *font, int max_width, char *out, size_t out_size) {
     int out_idx = 0;
     const char *p = str;
 
-    while (*p && out_idx < (int)out_size - 1) {
-        uint8_t c = decode_utf8_char(&p);
-        if (c == 0) break;
-        out[out_idx++] = c;
+    while (*p) {
+        uint32_t cp = utf8_next(&p);
+        if (cp == 0) break;
+        uint32_t glyphs[3];
+        int n = resolve_glyphs(font, cp, glyphs);
+        if (cp < 0x20) {
+            glyphs[0] = ' ';
+            n = 1;
+        }
+        if (out_idx + n > (int)out_size - 1) break;
+        for (int i = 0; i < n; i++) out[out_idx++] = (char)glyphs[i];
     }
     out[out_idx] = 0;
 
@@ -968,11 +1052,27 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
 }
 
 // Layout width of c, from the same glyph source used to draw it (font == NULL: SD font)
-static int glyph_advance(const GFXfont *font, uint8_t c) {
-    const GFXglyph *g = font_get_glyph((uint32_t)c, font, NULL);
+static int glyph_advance(const GFXfont *font, uint32_t c) {
+    const GFXglyph *g = font_get_glyph(c, font, NULL);
     if (!g) g = font_get_glyph('?', font, NULL);
     return g ? g->xAdvance : 0;
 }
+
+// Layout width of codepoint cp, after the same glyph resolution used for drawing
+static int codepoint_advance(const GFXfont *font, uint32_t cp) {
+    uint32_t glyphs[3];
+    int n = resolve_glyphs(font, cp, glyphs);
+    int w = 0;
+    for (int i = 0; i < n; i++) w += glyph_advance(font, glyphs[i]);
+    return w;
+}
+
+static bool is_layout_break(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+// One drawn line of source UTF-8 bytes and style codes; ~100 glyphs of up to 3 bytes fit
+#define READER_LINE_BUF_SIZE 384
 
 // Lays out one page of body text and returns the bytes of text_page it consumed.
 // With draw == false nothing is rendered, so page breaks can be computed off-screen.
@@ -996,8 +1096,9 @@ static uint32_t layout_reader_text(const char *text_page, bool draw, uint8_t sty
 
     const char *p = text_page;
     const char *page_start = text_page;
+    const char *end = utf8_text_end(text_page);
 
-    while (*p && cur_y <= max_y) {
+    while (p < end && cur_y <= max_y) {
         if (*p == '\r') {
             p++;
             continue;
@@ -1017,70 +1118,58 @@ static uint32_t layout_reader_text(const char *text_page, bool draw, uint8_t sty
             continue;
         }
 
-        uint8_t line_buf[256] = {0};
+        // The line keeps the source UTF-8; drawing resolves each glyph again the same way
+        char line_buf[READER_LINE_BUF_SIZE];
+        const int line_cap = (int)sizeof(line_buf) - 2; // room for a hyphen and the NUL
         int line_len = 0;
         int line_width = 0;
         const char *line_start_p = p;
 
-        while (*p && *p != '\n' && *p != '\r') {
+        while (p < end && *p != '\n' && *p != '\r') {
             const char *word_start_p = p;
-            uint8_t decoded_word[128] = {0};
-            int word_len = 0;
             int word_width = 0;
 
             if (*p == ' ' || *p == '\t') {
                 while (*p == ' ' || *p == '\t') p++;
                 int space_adv = glyph_advance(active_font, ' ');
-                if (line_len > 0 && (line_width + space_adv <= max_width)) {
+                if (line_len > 0 && line_len < line_cap && (line_width + space_adv <= max_width)) {
                     line_buf[line_len++] = ' ';
                     line_width += space_adv;
                 }
                 continue;
             }
 
-            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
-                uint8_t c = decode_utf8_char(&p);
-                if (c == 0) break;
+            while (p < end && !is_layout_break(*p)) {
+                word_width += codepoint_advance(active_font, utf8_next(&p));
+            }
+            int word_bytes = (int)(p - word_start_p);
 
-                int adv = (c >= 32) ? glyph_advance(active_font, c) : 0;
-
-                decoded_word[word_len++] = c;
-                word_width += adv;
+            if (line_width + word_width <= max_width && line_len + word_bytes <= line_cap) {
+                memcpy(line_buf + line_len, word_start_p, word_bytes);
+                line_len += word_bytes;
+                line_width += word_width;
+                continue;
             }
 
-            if (line_len == 0) {
-                if (word_width <= max_width) {
-                    memcpy(line_buf + line_len, decoded_word, word_len);
-                    line_len += word_len;
-                    line_width += word_width;
-                } else {
-                    int chunk_w = 0;
-                    int hyphen_adv = glyph_advance(active_font, '-');
-                    p = word_start_p;
-                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
-                        const char *before_char = p;
-                        uint8_t c = decode_utf8_char(&p);
-                        int adv = (c >= 32) ? glyph_advance(active_font, c) : 0;
-                        if (chunk_w + adv + hyphen_adv > max_width) {
-                            p = before_char;
-                            line_buf[line_len++] = '-';
-                            break;
-                        }
-                        line_buf[line_len++] = c;
-                        chunk_w += adv;
-                    }
+            p = word_start_p;
+            if (line_len > 0) break;
+
+            // A word wider than the whole line: split it with a hyphen, taking at least one glyph
+            int hyphen_adv = codepoint_advance(active_font, '-');
+            while (p < end && !is_layout_break(*p)) {
+                const char *before_char = p;
+                int adv = codepoint_advance(active_font, utf8_next(&p));
+                int n = (int)(p - before_char);
+                if ((line_width > 0 && line_width + adv + hyphen_adv > max_width) || line_len + n > line_cap) {
+                    p = before_char;
+                    line_buf[line_len++] = '-';
                     break;
                 }
-            } else {
-                if (line_width + word_width <= max_width) {
-                    memcpy(line_buf + line_len, decoded_word, word_len);
-                    line_len += word_len;
-                    line_width += word_width;
-                } else {
-                    p = word_start_p;
-                    break;
-                }
+                memcpy(line_buf + line_len, before_char, n);
+                line_len += n;
+                line_width += adv;
             }
+            break;
         }
 
         line_buf[line_len] = 0;
@@ -1089,8 +1178,8 @@ static uint32_t layout_reader_text(const char *text_page, bool draw, uint8_t sty
                 display_draw_gfx_string_styled(margin_left, cur_y, line_buf, line_len, active_font, 0, &page_italic, &page_bold, &page_underline);
             }
             cur_y += line_height;
-        } else {
-            if (p == line_start_p && *p) p++;
+        } else if (p == line_start_p && p < end) {
+            p++;
         }
     }
 
