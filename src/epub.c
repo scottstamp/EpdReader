@@ -2,6 +2,7 @@
 #include "puff.h"
 #include "inflate_stream.h"
 #include "html_text.h"
+#include "tjpgd.h"
 #include <zephyr/kernel.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/logging/log.h>
@@ -12,6 +13,12 @@
 
 LOG_MODULE_REGISTER(epub, LOG_LEVEL_INF);
 
+// A 4:2:0 baseline JPEG needs ~4 KB of TJpgDec pool with JD_SZBUF 1024
+#define COVER_JPEG_POOL 6144
+// An MCU row is at most 16 px tall and output never upscales, so it touches at most 17 rows
+#define COVER_ACC_ROWS  32
+#define COVER_ACC_MAX_W 160
+
 // Book conversion and cover extraction never run at the same time, so they share one work area
 static union {
     struct {
@@ -19,8 +26,8 @@ static union {
         uint8_t in[1024];
     } text;
     struct {
-        uint8_t comp[10240];  // compressed cover payload
-        uint8_t raw[16384];   // inflated cover payload
+        uint32_t pool[COVER_JPEG_POOL / 4];                // TJpgDec work area (word aligned)
+        uint16_t acc[COVER_ACC_ROWS][COVER_ACC_MAX_W];     // ring of output-row pixel sums
     } cover;
 } s_work;
 
@@ -788,58 +795,174 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
     return true;
 }
 
-static bool decode_jpeg_dc_cover(const uint8_t *jpeg_buf, size_t jpeg_len, uint8_t *gray_out, int target_w, int target_h) {
-    if (!jpeg_buf || jpeg_len < 100 || !gray_out) return false;
+#define COVER_TMP_PATH "/SD:/cache/cover.tmp"
 
-    if (jpeg_buf[0] != 0xFF || jpeg_buf[1] != 0xD8) return false;
+typedef struct {
+    struct fs_file_t *file;
+    uint32_t remaining;  // JPEG bytes left in the stream
+    uint8_t *gray_out;
+    int target_w;
+    int dec_w, dec_h;    // TJpgDec output size at the chosen scale
+    int fit_w, fit_h;    // size of the cover inside gray_out
+    int off_x, off_y;
+    int rows_done;       // fit rows already written to gray_out
+} CoverJpeg;
 
-    uint32_t width = 0, height = 0;
-    size_t pos = 2;
+static size_t cover_jpeg_in(JDEC *jd, uint8_t *buf, size_t len)
+{
+    CoverJpeg *cj = jd->device;
+    if (len > cj->remaining) len = cj->remaining;
+    if (len == 0) return 0;
+    if (!buf) {
+        // NULL buffer: TJpgDec is skipping a segment it does not need (EXIF, ICC, ...)
+        if (fs_seek(cj->file, (off_t)len, FS_SEEK_CUR) != 0) return 0;
+        cj->remaining -= (uint32_t)len;
+        return len;
+    }
+    ssize_t n = fs_read(cj->file, buf, len);
+    if (n <= 0) return 0;
+    cj->remaining -= (uint32_t)n;
+    return (size_t)n;
+}
 
-    while (pos < jpeg_len - 10) {
-        if (jpeg_buf[pos] != 0xFF) { pos++; continue; }
-        uint8_t marker = jpeg_buf[pos + 1];
-        if (marker == 0xD9) break;
+// Number of decoded pixels that land in output pixel o when d pixels shrink to f (d >= f)
+static uint32_t cover_span(uint32_t o, uint32_t d, uint32_t f)
+{
+    return ((o + 1) * d + f - 1) / f - (o * d + f - 1) / f;
+}
 
-        uint16_t len = (jpeg_buf[pos + 2] << 8) | jpeg_buf[pos + 3];
-
-        if (marker == 0xC0 || marker == 0xC1) {
-            height = (jpeg_buf[pos + 5] << 8) | jpeg_buf[pos + 6];
-            width = (jpeg_buf[pos + 7] << 8) | jpeg_buf[pos + 8];
-        } else if (marker == 0xDA) {
-            pos += 2 + len;
-            break;
+static void cover_flush_rows(CoverJpeg *cj, int upto)
+{
+    for (; cj->rows_done < upto; cj->rows_done++) {
+        int oy = cj->rows_done;
+        uint16_t *acc = s_work.cover.acc[oy % COVER_ACC_ROWS];
+        uint8_t *dst = cj->gray_out + (cj->off_y + oy) * cj->target_w + cj->off_x;
+        uint32_t ny = cover_span(oy, cj->dec_h, cj->fit_h);
+        for (int ox = 0; ox < cj->fit_w; ox++) {
+            uint32_t n = ny * cover_span(ox, cj->dec_w, cj->fit_w);
+            dst[ox] = (uint8_t)((acc[ox] + n / 2) / n);
+            acc[ox] = 0;
         }
-        pos += 2 + len;
+    }
+}
+
+// Box-filters each decoded block into the output rows it covers. MCUs arrive in raster
+// order, so a row is final once the MCU row containing its last source line is done.
+static int cover_jpeg_out(JDEC *jd, void *bitmap, JRECT *rect)
+{
+    CoverJpeg *cj = jd->device;
+    const uint8_t *px = bitmap;
+    for (int y = rect->top; y <= rect->bottom; y++) {
+        uint16_t *acc = s_work.cover.acc[(y * cj->fit_h / cj->dec_h) % COVER_ACC_ROWS];
+        for (int x = rect->left; x <= rect->right; x++) {
+            acc[x * cj->fit_w / cj->dec_w] += *px++;
+        }
+    }
+    if (rect->right + 1 >= cj->dec_w) {
+        cover_flush_rows(cj, (rect->bottom + 1) * cj->fit_h / cj->dec_h);
+    }
+    return 1;
+}
+
+// Decodes the baseline JPEG at the file's current position into gray_out, fitted
+// whole and centred on a white background.
+static bool decode_cover_jpeg(struct fs_file_t *file, uint32_t size, uint8_t *gray_out, int target_w, int target_h)
+{
+    if (target_w > COVER_ACC_MAX_W) return false;
+
+    // TJpgDec hunts for SOI byte by byte, so reject non-JPEG data up front
+    uint8_t soi[2];
+    off_t start = fs_tell(file);
+    if (size < 4 || fs_read(file, soi, 2) != 2 || soi[0] != 0xFF || soi[1] != 0xD8 ||
+        fs_seek(file, start, FS_SEEK_SET) != 0) {
+        LOG_WRN("Cover is not a JPEG");
+        return false;
     }
 
-    if (width == 0 || height == 0) return false;
-
-    LOG_INF("[JPEG Cover Decoder] Image dimensions %ux%u, scan offset: %u", width, height, (uint32_t)pos);
-
-    size_t scan_len = (jpeg_len > pos) ? (jpeg_len - pos) : 1;
-    const uint8_t *scan_data = jpeg_buf + pos;
-
-    // Apply 2D spatial low-pass filter to generate smooth continuous grayscale pixels
-    for (int y = 0; y < target_h; y++) {
-        for (int x = 0; x < target_w; x++) {
-            uint32_t center_idx = ((y * scan_len) / target_h + x) % scan_len;
-
-            uint32_t sum = 0;
-            int window = 5;
-            for (int k = -window; k <= window; k++) {
-                uint32_t idx = (center_idx + (uint32_t)(k * 13) + scan_len) % scan_len;
-                sum += scan_data[idx];
-            }
-            uint8_t avg_val = (uint8_t)(sum / (2 * window + 1));
-
-            // High-contrast contrast stretching
-            uint8_t final_gray = (uint8_t)(20 + ((uint32_t)avg_val * 215) / 255);
-            gray_out[y * target_w + x] = final_gray;
-        }
+    CoverJpeg cj = { .file = file, .remaining = size, .gray_out = gray_out, .target_w = target_w };
+    JDEC jd;
+    JRESULT rc = jd_prepare(&jd, cover_jpeg_in, s_work.cover.pool, sizeof(s_work.cover.pool), &cj);
+    if (rc != JDR_OK) {
+        // JDR_FMT3 covers progressive and other non-baseline JPEGs
+        LOG_WRN("Cover JPEG not decodable (jd_prepare %d)", rc);
+        return false;
     }
 
+    // Fit the whole cover inside the target, keeping its aspect ratio
+    int fit_w = target_w;
+    int fit_h = (int)(((uint32_t)jd.height * target_w + jd.width / 2) / jd.width);
+    if (fit_h > target_h) {
+        fit_h = target_h;
+        fit_w = (int)(((uint32_t)jd.width * target_h + jd.height / 2) / jd.height);
+    }
+    if (fit_w < 1) fit_w = 1;
+    if (fit_h < 1) fit_h = 1;
+
+    // Smallest TJpgDec scale that still has at least one pixel per output pixel
+    uint8_t scale = 3;
+    while (scale > 0 && ((jd.width >> scale) < fit_w || (jd.height >> scale) < fit_h)) scale--;
+    cj.dec_w = jd.width >> scale;
+    cj.dec_h = jd.height >> scale;
+    // Tiny images are centred at their own size rather than upscaled
+    if (cj.dec_w < fit_w) fit_w = cj.dec_w;
+    if (cj.dec_h < fit_h) fit_h = cj.dec_h;
+    // Each 16-bit sum must hold every source pixel of its output pixel
+    uint32_t max_px = (uint32_t)((cj.dec_w + fit_w - 1) / fit_w) * ((cj.dec_h + fit_h - 1) / fit_h);
+    if (max_px > 0xFFFF / 255) {
+        LOG_WRN("Cover JPEG too large: %ux%u", jd.width, jd.height);
+        return false;
+    }
+    cj.fit_w = fit_w;
+    cj.fit_h = fit_h;
+    cj.off_x = (target_w - fit_w) / 2;
+    cj.off_y = (target_h - fit_h) / 2;
+
+    memset(gray_out, 0xFF, (size_t)target_w * target_h);
+    memset(s_work.cover.acc, 0, sizeof(s_work.cover.acc));
+
+    uint32_t start_ms = k_uptime_get_32();
+    rc = jd_decomp(&jd, cover_jpeg_out, scale);
+    if (rc != JDR_OK) {
+        LOG_WRN("Cover JPEG decode failed (jd_decomp %d)", rc);
+        return false;
+    }
+    cover_flush_rows(&cj, fit_h);
+    LOG_INF("Cover JPEG %ux%u decoded at 1/%d to %dx%d in %u ms", jd.width, jd.height,
+            1 << scale, fit_w, fit_h, k_uptime_get_32() - start_ms);
     return true;
+}
+
+typedef struct {
+    EntryReader reader;  // first, so entry_read() can take this context as-is
+    struct fs_file_t *dst;
+} CoverInflate;
+
+static int cover_tmp_sink(void *ctx, const uint8_t *buf, size_t len)
+{
+    CoverInflate *ci = ctx;
+    return fs_write(ci->dst, buf, len) == (ssize_t)len ? 0 : -EIO;
+}
+
+// TJpgDec pulls its input while inflate pushes its output, and the 32 KB inflate window
+// leaves no room for the JPEG pool, so deflated covers are unpacked to a temp file first.
+static bool inflate_cover_to_tmp(struct fs_file_t *src, const EpubCoverInfo *cover)
+{
+    struct fs_file_t dst;
+    fs_file_t_init(&dst);
+    if (fs_open(&dst, COVER_TMP_PATH, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC) != 0) {
+        return false;
+    }
+    CoverInflate ci = { .reader = { .src = src, .remaining = cover->compressed_size }, .dst = &dst };
+    int err = fs_seek(src, cover->payload_offset, FS_SEEK_SET);
+    if (err == 0) {
+        err = inflate_stream(s_work.text.window, s_work.text.in, sizeof(s_work.text.in),
+                             entry_read, cover_tmp_sink, &ci);
+    }
+    fs_close(&dst);
+    if (err != 0) {
+        LOG_WRN("Cover inflate failed (%d)", err);
+    }
+    return err == 0;
 }
 
 bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int target_w, int target_h) {
@@ -864,10 +987,24 @@ bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int targe
         }
     }
 
-    /* 2. Slow Path: Read EPUB cover image payload from SD card */
+    /* 2. Slow Path: decode the cover JPEG straight from the EPUB (or an inflated temp copy) */
     if (!book->cover.found) {
         LOG_WRN("No cover image entry found in EPUB: %s", book->book_path);
         return false;
+    }
+    if (my_strcasestr(book->cover.cover_path, ".png") != NULL) {
+        LOG_INF("PNG cover not supported: %s", book->cover.cover_path);
+        return false;
+    }
+    uint16_t comp_method = book->cover.compression_method;
+    if (comp_method != 0 && comp_method != 8) {
+        LOG_WRN("Unsupported cover compression %u: %s", comp_method, book->cover.cover_path);
+        return false;
+    }
+
+    struct fs_dirent cache_dir_stat;
+    if (fs_stat("/SD:/cache", &cache_dir_stat) != 0) {
+        fs_mkdir("/SD:/cache");
     }
 
     struct fs_file_t file;
@@ -876,48 +1013,29 @@ bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int targe
         return false;
     }
 
-    uint32_t comp_size = book->cover.compressed_size;
-    uint32_t payload_offset = book->cover.payload_offset;
-    uint16_t comp_method = book->cover.compression_method;
-
-    uint8_t *comp_buf = s_work.cover.comp;
-    uint8_t *inflated_buf = s_work.cover.raw;
-
-    fs_seek(&file, payload_offset, FS_SEEK_SET);
-    size_t comp_read = (comp_size < sizeof(s_work.cover.comp)) ? comp_size : sizeof(s_work.cover.comp);
-    fs_read(&file, comp_buf, comp_read);
-    fs_close(&file);
-
-    uint8_t *raw_buf = comp_buf;
-    size_t raw_len = comp_read;
-
-    if (comp_method == 8) {
-        unsigned long dest_len = sizeof(s_work.cover.raw);
-        unsigned long src_len = comp_read;
-        int p_res = puff(inflated_buf, &dest_len, comp_buf, &src_len);
-        if (p_res == 0 && dest_len > 0) {
-            raw_buf = inflated_buf;
-            raw_len = dest_len;
-        }
-    }
-
-    /* 3. Decode JPEG image stream into continuous 0-255 grayscale cover array */
-    if (!decode_jpeg_dc_cover(raw_buf, raw_len, gray_out, target_w, target_h)) {
-        for (int y = 0; y < target_h; y++) {
-            for (int x = 0; x < target_w; x++) {
-                uint32_t sample_idx = ((y * raw_len) / target_h + x) % raw_len;
-                uint8_t b = raw_buf[sample_idx];
-                gray_out[y * target_w + x] = (uint8_t)(15 + ((uint32_t)b * 225) / 255);
+    bool ok;
+    if (comp_method == 0) {
+        ok = fs_seek(&file, book->cover.payload_offset, FS_SEEK_SET) == 0 &&
+             decode_cover_jpeg(&file, book->cover.compressed_size, gray_out, target_w, target_h);
+        fs_close(&file);
+    } else {
+        ok = inflate_cover_to_tmp(&file, &book->cover);
+        fs_close(&file);
+        if (ok) {
+            fs_file_t_init(&file);
+            ok = fs_open(&file, COVER_TMP_PATH, FS_O_READ) == 0;
+            if (ok) {
+                ok = decode_cover_jpeg(&file, book->cover.uncompressed_size, gray_out, target_w, target_h);
+                fs_close(&file);
             }
         }
+        fs_unlink(COVER_TMP_PATH);
+    }
+    if (!ok) {
+        return false;
     }
 
-    /* 4. Save generated 145x210 cover bitmap to SD sidecar cache (.cov) for instant future loads */
-    struct fs_dirent cache_dir_stat;
-    if (fs_stat("/SD:/cache", &cache_dir_stat) != 0) {
-        fs_mkdir("/SD:/cache");
-    }
-
+    /* 3. Save the 145x210 cover bitmap to the SD sidecar cache (.cov) for instant future loads */
     struct fs_file_t out_file;
     fs_file_t_init(&out_file);
     int res = fs_open(&out_file, cov_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
