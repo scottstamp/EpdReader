@@ -494,7 +494,7 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
         if (from_white) {
             // Old frame for the partial draw below
             epd_fill_ram(config, 0x10, 0xFF, desc->buf_size);
-            LOG_INF("EPD full refresh to white: refresh %u ms", t_refresh - t_pwr);
+            LOG_DBG("EPD full refresh to white: refresh %u ms", t_refresh - t_pwr);
         }
     }
 
@@ -542,7 +542,7 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
         epd_write_ram(config, 0x10, buf, desc->buf_size);
     }
 
-    LOG_INF("EPD %s refresh: tx %u ms, power-on %u ms, refresh %u ms, total %u ms",
+    LOG_DBG("EPD %s refresh: tx %u ms, power-on %u ms, refresh %u ms, total %u ms",
             from_white ? "full+draw" : full ? "full" : "partial", t_tx - t_start, t_pwr - t_tx, t_refresh - t_pwr,
             k_uptime_get_32() - t_start);
 

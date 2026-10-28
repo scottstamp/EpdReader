@@ -9,7 +9,6 @@ int storage_init(void);
 // Hand the SD card to USB mass storage (unmounts FAT) and take it back (remounts)
 int storage_release_for_usb(void);
 int storage_reclaim_from_usb(void);
-void storage_dump_tree(void);
 
 // Library listing. Each pool entry is the filename followed by its display label,
 // e.g. "Title - 42%" (no percent for books never opened).

@@ -158,7 +158,6 @@ static void parse_toc_ncx_titles(const char *ncx_buf, EpubBook *book)
 
                 if (my_strcasecmp(cbase, base) == 0) {
                     snprintf(book->chapters[c].title, sizeof(book->chapters[c].title), "%s", title);
-                    LOG_INF("[EPUB TOC Match] %s -> '%s'", cbase, title);
                     break;
                 }
             }
@@ -289,7 +288,6 @@ static bool parse_opf_spine_order(const char *opf_buf, EpubBook *book)
         slot_of[order[i]] = (int16_t)i;
     }
 
-    LOG_INF("[EPUB Spine] Re-ordered %d chapters according to OPF spine", ordered_count);
     book->chapter_count = ordered_count;
     return true;
 }
@@ -591,8 +589,6 @@ static void extract_tag_text(const char *xml, const char *tag, const char *alt_t
 bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
     if (!epub_path || !book) return false;
 
-    LOG_INF("=== EPUB SCAN START: %s ===", epub_path);
-
     memset(book, 0, sizeof(EpubBook));
     snprintf(book->book_path, sizeof(book->book_path), "%s", epub_path);
 
@@ -636,7 +632,6 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
         uint8_t hdr[30];
         ssize_t read_bytes = fs_read(&file, hdr, 30);
         if (read_bytes < 30) {
-            LOG_INF("EPUB scan EOF at pos %u (read %d bytes)", curr_pos, (int)read_bytes);
             break;
         }
 
@@ -645,7 +640,6 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
         // Check ZIP Local Header Signature 0x04034b50 ("PK\x03\x04")
         uint32_t sig = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | (hdr[3] << 24);
         if (sig != 0x04034b50) {
-            LOG_INF("EPUB scan end of local headers (sig=0x%08X at pos %u)", sig, curr_pos);
             break;
         }
 
@@ -675,7 +669,6 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
             ncx_comp_method = comp_method;
             ncx_comp_size = comp_size;
             ncx_uncomp_size = uncomp_size;
-            LOG_INF("[EPUB TOC NCX Found] %s (offset: %u)", filename, payload_offset);
         }
 
         bool is_html = (strstr(lower_name, ".xhtml") != NULL || strstr(lower_name, ".html") != NULL || strstr(lower_name, ".htm") != NULL);
@@ -691,7 +684,6 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
             book->cover.payload_offset = payload_offset;
             book->cover.compressed_size = comp_size;
             book->cover.uncompressed_size = uncomp_size;
-            LOG_INF("[EPUB Cover Image Found] %s (offset: %u, comp_sz: %u)", filename, payload_offset, comp_size);
         }
 
         if ((strstr(lower_name, "content.opf") != NULL || strstr(lower_name, ".opf") != NULL) && uncomp_size > 0 && uncomp_size < 32768) {
@@ -708,8 +700,6 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
             ch->payload_offset = payload_offset;
             ch->compressed_size = comp_size;
             ch->uncompressed_size = uncomp_size;
-            LOG_INF("Scanned ZIP chapter: %s (comp_method: %u, offset: %u, comp_sz: %u)",
-                    filename, comp_method, payload_offset, comp_size);
         }
 
         uint32_t next_pos = payload_offset + comp_size;
@@ -728,7 +718,6 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
         if (opf) {
             extract_tag_text(opf, "<dc:title", "<title", book->title, sizeof(book->title));
             extract_tag_text(opf, "<dc:creator", "<creator", book->author, sizeof(book->author));
-            LOG_INF("[EPUB Metadata] Title: %s / Author: %s", book->title, book->author);
             spine_ordered = parse_opf_spine_order(opf, book);
         } else {
             LOG_WRN("[EPUB OPF] Could not read the package file (%u bytes)", opf_uncomp_size);
@@ -785,13 +774,8 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
         return false;
     }
 
-    for (int i = 0; i < book->chapter_count; i++) {
-        LOG_INF("Ordered Chapter [%d]: %s ('%s', cum_offset: %u, text_len: %u)",
-                i, book->chapters[i].chapter_path, book->chapters[i].title, book->chapters[i].cum_offset, book->chapters[i].text_length);
-    }
-
-    LOG_INF("=== EPUB SCAN COMPLETE: Found %d sorted chapters, total text len: %u ===",
-            book->chapter_count, book->total_book_text_len);
+    LOG_INF("Indexed \"%s\" by %s: %d chapters%s, %u bytes of text", book->title, book->author,
+            book->chapter_count, spine_ordered ? " (spine order)" : "", book->total_book_text_len);
 
     save_sidecar_cache(cache_path, book);
     return true;

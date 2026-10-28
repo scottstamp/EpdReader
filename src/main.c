@@ -675,7 +675,7 @@ static void render_current_state(void) {
                 if (last_page_bytes_read == 0) last_page_bytes_read = 300;
 
                 // The panel driver logs its own refresh breakdown just before this
-                LOG_INF("Page turn: read %u ms, style scan %u ms, layout+refresh %u ms, total %u ms",
+                LOG_DBG("Page turn: read %u ms, style scan %u ms, layout+refresh %u ms, total %u ms",
                         t_read - t_start, t_style - t_read, k_uptime_get_32() - t_style,
                         k_uptime_get_32() - t_start);
             }

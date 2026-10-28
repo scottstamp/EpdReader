@@ -73,44 +73,6 @@ static bool ends_with_epub(const char *str) {
     return false;
 }
 
-static void storage_dump_dir(const char *path, int depth) {
-    struct fs_dir_t dir;
-    struct fs_dirent entry;
-
-    fs_dir_t_init(&dir);
-    int res = fs_opendir(&dir, path);
-    if (res != 0) {
-        LOG_WRN("[SD TREE] Failed to open: %s (err=%d)", path, res);
-        return;
-    }
-
-    while (fs_readdir(&dir, &entry) == 0 && entry.name[0] != '\0') {
-        char full_path[512];
-        if (path[strlen(path) - 1] == '/') {
-            snprintf(full_path, sizeof(full_path), "%.240s%.255s", path, entry.name);
-        } else {
-            snprintf(full_path, sizeof(full_path), "%.240s/%.255s", path, entry.name);
-        }
-
-        if (entry.type == FS_DIR_ENTRY_DIR) {
-            LOG_INF("[SD TREE] [DIR]  %s", full_path);
-            if (depth < 3) {
-                storage_dump_dir(full_path, depth + 1);
-            }
-        } else {
-            LOG_INF("[SD TREE] [FILE] %s (%u bytes)", full_path, (uint32_t)entry.size);
-        }
-    }
-    fs_closedir(&dir);
-}
-
-void storage_dump_tree(void) {
-    LOG_INF("===================================");
-    LOG_INF("=== SD CARD DIRECTORY STRUCTURE ===");
-    storage_dump_dir(SD_MOUNT_POINT, 0);
-    LOG_INF("===================================");
-}
-
 int storage_init(void) {
     // Power-on stabilization delay for SD card internal controller after System OFF wake-up
     k_msleep(250);
@@ -133,7 +95,6 @@ int storage_init(void) {
     if (fs_stat(SD_MOUNT_POINT "/cache", &cache_dir_stat) != 0) {
         fs_mkdir(SD_MOUNT_POINT "/cache");
     }
-    storage_dump_tree();
     return 0;
 }
 
@@ -335,7 +296,6 @@ bool storage_read_book_page(const char *book_name, uint32_t offset, char *page_b
     if (bytes >= 0) {
         page_buf[bytes] = '\0';
         *bytes_read = (uint32_t)bytes;
-        LOG_INF("[SD Book] Read %d bytes from %s at offset %u", bytes, full_path, offset);
         return true;
     }
 
@@ -626,7 +586,6 @@ int storage_list_sd_books(BookList *list) {
             totals[list->count] = total;
             list->count++;
             used += need;
-            LOG_INF("[SD Book Found] %s (in %s)", entry.name, dirs_to_check[d]);
         }
         fs_closedir(&dir);
     }
