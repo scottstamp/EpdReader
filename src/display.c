@@ -942,72 +942,6 @@ void display_draw_progress(const char *task, int percentage) {
     display_update(false);
 }
 
-// Maps the image's own dark/light range (2nd-98th percentile) onto full black-white and
-// darkens midtones, so pale cover art and white titles survive 1-bit dithering
-static void build_tone_curve(const uint8_t *gray_img, int img_w, int img_h, uint8_t lut[256]) {
-    uint32_t hist[256] = {0};
-    uint32_t total = (uint32_t)img_w * img_h;
-    for (uint32_t i = 0; i < total; i++) {
-        hist[gray_img[i]]++;
-    }
-
-    uint32_t clip = total / 50;
-    int lo = 0, hi = 255;
-    uint32_t acc = 0;
-    for (int v = 0; v < 256; v++) {
-        acc += hist[v];
-        if (acc > clip) { lo = v; break; }
-    }
-    acc = 0;
-    for (int v = 255; v >= 0; v--) {
-        acc += hist[v];
-        if (acc > clip) { hi = v; break; }
-    }
-    int span = MAX(hi - lo, 1);
-
-    for (int v = 0; v < 256; v++) {
-        int s = CLAMP((v - lo) * 255 / span, 0, 255);
-        // Halfway between linear and squared: roughly a 1.4 gamma
-        lut[v] = (uint8_t)((s * 255 + s * s) / 510);
-    }
-}
-
-void display_draw_dithered(int dst_x, int dst_y, int target_w, int target_h, const uint8_t *gray_img, int img_w, int img_h) {
-    if (!gray_img || img_w <= 0 || img_h <= 0 || target_w <= 0 || target_h <= 0) return;
-    if (target_w > 200) target_w = 200;
-
-    uint8_t lut[256];
-    build_tone_curve(gray_img, img_w, img_h, lut);
-
-    // Floyd-Steinberg keeps all of the quantization error (Atkinson dropped a quarter of
-    // it, which washed out midtones); error kept in 1/16 units over two rows
-    static int16_t err_buf[2][200];
-    memset(err_buf, 0, sizeof(err_buf));
-
-    for (int y = 0; y < target_h; y++) {
-        int16_t *cur = err_buf[y & 1];
-        int16_t *next = err_buf[(y + 1) & 1];
-        memset(next, 0, target_w * sizeof(int16_t));
-        int src_y = (y * img_h) / target_h;
-
-        for (int x = 0; x < target_w; x++) {
-            int src_x = (x * img_w) / target_w;
-            int val = lut[gray_img[src_y * img_w + src_x]] + cur[x] / 16;
-            val = CLAMP(val, 0, 255);
-
-            int out = (val >= 128) ? 255 : 0;
-            int err = val - out;
-
-            display_draw_pixel(dst_x + x, dst_y + y, out ? 1 : 0);
-
-            if (x + 1 < target_w) cur[x + 1] += err * 7;
-            if (x > 0) next[x - 1] += err * 3;
-            next[x] += err * 5;
-            if (x + 1 < target_w) next[x + 1] += err;
-        }
-    }
-}
-
 void display_draw_lockscreen(const char *book_name, const char *title, const char *author, const char *chapter_title, uint32_t progress_pct) {
     display_clear_buffer();
 
@@ -1016,34 +950,23 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
     int cover_w = 145;
     int cover_h = 210;
 
-    static uint8_t cover_gray_buf[145 * 210];
+    // Already dithered to 1 bit by the cover decoder (and cached that way)
+    static uint8_t cover_bits[((145 + 7) / 8) * 210];
     bool has_cover = false;
 
     if (book_name && book_name[0] != '\0') {
         const EpubBook *epub = storage_get_epub(book_name);
-        has_cover = epub && epub_extract_cover_image(epub, cover_gray_buf, cover_w, cover_h);
+        has_cover = epub && epub_extract_cover_image(epub, cover_bits, cover_w, cover_h);
     }
 
     if (has_cover) {
         // --- LAYOUT A: WITH .COV COVER BITMAP ---
-        bool is_binary = true;
-        for (int i = 0; i < cover_w * cover_h; i++) {
-            uint8_t v = cover_gray_buf[i];
-            if (v > 10 && v < 245) {
-                is_binary = false;
-                break;
+        const int stride = (cover_w + 7) / 8;
+        for (int y = 0; y < cover_h; y++) {
+            for (int x = 0; x < cover_w; x++) {
+                bool white = cover_bits[y * stride + x / 8] & (0x80 >> (x % 8));
+                display_draw_pixel(cover_x + x, cover_y + y, white ? 1 : 0);
             }
-        }
-
-        if (is_binary) {
-            for (int y = 0; y < cover_h; y++) {
-                for (int x = 0; x < cover_w; x++) {
-                    uint8_t val = cover_gray_buf[y * cover_w + x];
-                    display_draw_pixel(cover_x + x, cover_y + y, (val < 128) ? 0 : 1);
-                }
-            }
-        } else {
-            display_draw_dithered(cover_x, cover_y, cover_w, cover_h, cover_gray_buf, cover_w, cover_h);
         }
         display_draw_rect(cover_x, cover_y, cover_w, cover_h, 0);
 

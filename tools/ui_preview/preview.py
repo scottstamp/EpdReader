@@ -74,7 +74,7 @@ def main():
     parser.add_argument("--out", default=os.path.join(HERE, "out"), help="output directory for PNGs")
     parser.add_argument("--scale", type=int, default=2, help="pixel scale factor")
     parser.add_argument("--books", nargs="*", default=[], help="EPUB files to convert and paginate")
-    parser.add_argument("--cover", help="raw 145x210 8-bit grayscale cover (e.g. a .cov file) for the lock screen")
+    parser.add_argument("--cover", help="lock screen cover: a .cov file from the SD card, or a raw 145x210 8-bit grayscale dump")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -88,6 +88,7 @@ def main():
             os.path.join(HERE, "ui_preview.c"),
             os.path.join(REPO, "src", "display.c"),
             os.path.join(REPO, "src", "font_extended.c"),
+            os.path.join(REPO, "src", "dither.c"),
             "-o", exe,
         ]
         subprocess.run(cmd, check=True)

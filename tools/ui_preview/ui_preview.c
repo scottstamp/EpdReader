@@ -8,6 +8,7 @@
 #include "battery.h"
 #include "epub.h"
 #include "font_extended.h"
+#include "dither.h"
 
 const struct device stub_epd_device;
 static const uint8_t *last_fb;
@@ -26,25 +27,39 @@ int gdey037t03_get_refresh_config(const struct device *dev, struct gdey037t03_re
     (void)dev; cfg->profile = GDEY037T03_PROFILE_NORMAL; cfg->pulse_interval = 2; cfg->pulse_count = 3; cfg->frame_rate = 0; return 0;
 }
 uint8_t battery_get_percentage(void) { return 85; }
-// The lock screen gets a cover when UI_PREVIEW_COVER names an 8-bit grayscale file of the
-// requested size: a .cov cache file from the SD card, or a raw dump
+// The lock screen gets a cover when UI_PREVIEW_COVER names either a .cov cache file from the
+// SD card ("COV3" header + 1-bit rows) or a raw 8-bit grayscale dump of the target size, which
+// is dithered here the way the firmware's cover decoder does it
 static EpubBook preview_book;
 const EpubBook *storage_get_epub(const char *n) { (void)n; return getenv("UI_PREVIEW_COVER") ? &preview_book : NULL; }
-bool epub_extract_cover_image(const EpubBook *b, uint8_t *g, int w, int h) {
+bool epub_extract_cover_image(const EpubBook *b, uint8_t *bits, int w, int h) {
     (void)b;
     const char *path = getenv("UI_PREVIEW_COVER");
     FILE *f = path ? fopen(path, "rb") : NULL;
     if (!f) return false;
-    // .cov files from the firmware start with an 8-byte "COV2" header; raw dumps don't
+    size_t stride = ((size_t)w + 7) / 8;
     char magic[4];
-    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "COV2", 4) == 0) {
+    bool ok;
+    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "COV3", 4) == 0) {
         fseek(f, 8, SEEK_SET);
+        ok = fread(bits, 1, stride * h, f) == stride * h;
     } else {
+        static uint8_t gray[200 * 420];
         fseek(f, 0, SEEK_SET);
+        ok = (size_t)w * h <= sizeof(gray) && fread(gray, 1, (size_t)w * h, f) == (size_t)w * h;
+        if (ok) {
+            uint32_t hist[256] = {0};
+            uint8_t lut[256];
+            int16_t err[2 * 200];
+            Ditherer d;
+            for (int y = 0; y < h; y++) dither_hist_row(hist, gray + y * w, w);
+            dither_build_lut(hist, lut);
+            dither_start(&d, w, err, lut);
+            for (int y = 0; y < h; y++) dither_row(&d, gray + y * w, bits + y * stride);
+        }
     }
-    size_t got = fread(g, 1, (size_t)w * h, f);
     fclose(f);
-    return got == (size_t)w * h;
+    return ok;
 }
 
 // Writes the logical 416x240 landscape view (flipped orientation, the default)

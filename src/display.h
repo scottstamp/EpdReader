@@ -82,8 +82,6 @@ void display_draw_checklist(const char *header, const char *sub_footer, const ch
 void display_draw_message(const char *title, const char *msg, bool is_alert);
 void display_draw_progress(const char *task, int percentage);
 void display_draw_lockscreen(const char *book_name, const char *title, const char *author, const char *chapter_title, uint32_t progress_pct);
-// Tone-mapped Floyd-Steinberg dither of an 8-bit grayscale image into the framebuffer
-void display_draw_dithered(int dst_x, int dst_y, int target_w, int target_h, const uint8_t *gray_img, int img_w, int img_h);
 // Inline style state at the start of a page (styles can stay open across page breaks)
 #define READER_STYLE_ITALIC    0x01
 #define READER_STYLE_BOLD      0x02

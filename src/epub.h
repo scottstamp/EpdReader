@@ -52,6 +52,8 @@ void epub_build_text_path(const char *epub_path, char *out, size_t max_len);
 // the chapter table. False if the book has not been converted (or the cache is stale).
 bool epub_read_cached_metadata(const char *epub_path, char *title, size_t title_max,
                                char *author, size_t author_max, uint32_t *total_len);
-bool epub_extract_cover_image(const EpubBook *book, uint8_t *gray_out, int target_w, int target_h);
+// The book's cover fitted into target_w x target_h and dithered to 1 bit: rows of
+// (target_w + 7) / 8 bytes, MSB first, 1 = white. Decoded once, then cached on the SD card.
+bool epub_extract_cover_image(const EpubBook *book, uint8_t *bits_out, int target_w, int target_h);
 
 #endif // EPUB_H

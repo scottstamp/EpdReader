@@ -26,6 +26,7 @@ target_sources(app PRIVATE
     src/lists.c
     src/lists_ble.c
     src/inflate_stream.c
+    src/dither.c
     src/html_text.c
     src/epub.c
     src/font_extended.c
