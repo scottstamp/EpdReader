@@ -595,31 +595,6 @@ int storage_list_sd_books(BookList *list) {
     return list->count;
 }
 
-bool storage_read_stats(uint32_t *out_total_seconds) {
-    *out_total_seconds = 0;
-    struct fs_dirent entry;
-    if (fs_stat(STATS_FILE, &entry) != 0) {
-        return false;
-    }
-
-    struct fs_file_t file;
-    fs_file_t_init(&file);
-    if (fs_open(&file, STATS_FILE, FS_O_READ) != 0) {
-        return false;
-    }
-
-    char line[32] = {0};
-    int bytes = fs_read(&file, line, sizeof(line) - 1);
-    fs_close(&file);
-
-    if (bytes <= 0) return false;
-    line[bytes] = '\0';
-
-    *out_total_seconds = (uint32_t)strtoul(line, NULL, 10);
-    return true;
-}
-
-
 #define SLEEP_STATE_FILE SD_MOUNT_POINT "/sleep.txt"
 
 bool storage_read_sleep_state(int *state, int *menu_idx, char *active_book) {
@@ -669,37 +644,6 @@ bool storage_write_sleep_state(int state, int menu_idx, const char *active_book)
 
 void storage_clear_sleep_state(void) {
     fs_unlink(SLEEP_STATE_FILE);
-}
-
-#define REFRESH_SETTINGS_FILE SD_MOUNT_POINT "/refresh.txt"
-
-bool storage_read_refresh_settings(int *profile, uint8_t *interval, uint8_t *count) {
-    struct fs_dirent entry;
-    if (fs_stat(REFRESH_SETTINGS_FILE, &entry) != 0) return false;
-
-    struct fs_file_t file;
-    fs_file_t_init(&file);
-    if (fs_open(&file, REFRESH_SETTINGS_FILE, FS_O_READ) != 0) return false;
-
-    char line[64] = {0};
-    int bytes = fs_read(&file, line, sizeof(line) - 1);
-    fs_close(&file);
-    if (bytes <= 0) return false;
-    line[bytes] = '\0';
-
-    // Format: "%d:%u:%u\n"
-    char *c1 = strchr(line, ':');
-    if (!c1) return false;
-    *c1 = '\0';
-    *profile = atoi(line);
-
-    char *c2 = strchr(c1 + 1, ':');
-    if (!c2) return false;
-    *c2 = '\0';
-    *interval = (uint8_t)atoi(c1 + 1);
-    *count = (uint8_t)atoi(c2 + 1);
-
-    return true;
 }
 
 

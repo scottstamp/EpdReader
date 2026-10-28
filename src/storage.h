@@ -44,13 +44,8 @@ bool storage_read_progress(char *book_name, uint32_t *offset);
 bool storage_read_book_progress(const char *book_name, uint32_t *offset);
 bool storage_write_progress(const char *book_name, uint32_t offset);
 
-// Legacy SD files, read once to migrate into prefs
-bool storage_read_stats(uint32_t *total_seconds);
-
 bool storage_read_sleep_state(int *state, int *menu_idx, char *active_book);
 bool storage_write_sleep_state(int state, int menu_idx, const char *active_book);
 void storage_clear_sleep_state(void);
-
-bool storage_read_refresh_settings(int *profile, uint8_t *interval, uint8_t *count);
 
 #endif // STORAGE_H

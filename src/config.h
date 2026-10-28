@@ -20,7 +20,6 @@
 #define BOOK_POOL_SIZE 2240
 // Per-book reading positions kept in PROGRESS_FILE (least recently opened dropped first)
 #define MAX_PROGRESS_ENTRIES 64
-#define MAX_CHAPTERS 100
 #define HISTORY_SIZE 64
 #define AUTO_SLEEP_MS 300000 // 5 minutes inactivity timeout
 #define EPD_FULL_REFRESH_INTERVAL 60 // partial refreshes between ghost-clearing full refreshes
@@ -29,6 +28,5 @@
 #define SD_MOUNT_POINT "/SD:"
 #define BOOK_DIR "/SD:/books"
 #define PROGRESS_FILE "/SD:/progress.dat"
-#define STATS_FILE "/SD:/stats.dat"
 
 #endif // CONFIG_H
