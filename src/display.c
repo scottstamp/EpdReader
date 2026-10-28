@@ -97,16 +97,8 @@ void display_get_refresh_config(enum gdey037t03_refresh_profile *profile, uint8_
     *frame_rate = cfg.frame_rate;
 }
 
-void display_power_on(void) {
-}
-
 void display_power_off(void) {
     display_blanking_on(epd_dev);
-}
-
-void display_app_clear(void) {
-    display_clear_buffer();
-    display_update(true);
 }
 
 void display_set_portrait(bool portrait) {
@@ -369,20 +361,6 @@ void display_draw_rect(int x, int y, int w, int h, uint8_t color) {
     for (int j = y; j < y + h; j++) {
         display_draw_pixel(x, j, color);
         display_draw_pixel(x + w - 1, j, color);
-    }
-}
-
-void display_draw_line(int x0, int y0, int x1, int y1, uint8_t color) {
-    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-    int err = dx + dy, e2;
-
-    while (1) {
-        display_draw_pixel(x0, y0, color);
-        if (x0 == x1 && y0 == y1) break;
-        e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x0 += sx; }
-        if (e2 <= dx) { err += dx; y0 += sy; }
     }
 }
 
@@ -798,10 +776,6 @@ void display_draw_carousel(const CarouselItem *items, int count, int selected) {
     }
 
     display_update(false);
-}
-
-void display_draw_string(int x, int y, const char *str, uint8_t color) {
-    display_draw_gfx_string(x, y + 14, str, &AmazonEmber_Medium12pt7b, color);
 }
 
 void display_draw_battery(int percent) {

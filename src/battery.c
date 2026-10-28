@@ -1,4 +1,5 @@
 #include "battery.h"
+#include "ble.h"
 #include <zephyr/drivers/adc.h>
 #include <zephyr/logging/log.h>
 #include <stdlib.h>
@@ -105,6 +106,7 @@ uint8_t battery_get_percentage(void) {
     cached_pct = battery_get_percentage_from_mv(mv);
     cached_at = now;
     cached = true;
+    ble_update_battery_level(cached_pct);
     LOG_DBG("Battery level: %u mV -> %u%%", mv, cached_pct);
     return cached_pct;
 }

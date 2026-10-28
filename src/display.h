@@ -35,9 +35,7 @@ typedef enum {
 
 // Display API
 int display_init(void);
-void display_power_on(void);
 void display_power_off(void);
-void display_app_clear(void);
 void display_update(bool full_refresh);
 // Make the next display_update a full refresh
 void display_request_full_refresh(void);
@@ -52,8 +50,6 @@ bool display_is_flipped(void);
 void display_draw_pixel(int x, int y, uint8_t color);
 void display_fill_rect(int x, int y, int w, int h, uint8_t color);
 void display_draw_rect(int x, int y, int w, int h, uint8_t color);
-void display_draw_line(int x0, int y0, int x1, int y1, uint8_t color);
-void display_draw_string(int x, int y, const char *str, uint8_t color);
 
 typedef struct {
     const Icon *icon_large;
@@ -105,7 +101,6 @@ void display_set_spacing(LineSpacing spacing);
 void display_cycle_spacing(void);
 
 ContrastMode display_get_contrast(void);
-void display_app_clear(void);
 void display_app_set_contrast(ContrastMode mode);
 void display_cycle_contrast(void);
 
