@@ -1,5 +1,4 @@
 #include "epub.h"
-#include "puff.h"
 #include "inflate_stream.h"
 #include "html_text.h"
 #include "tjpgd.h"
@@ -515,6 +514,75 @@ static bool convert_book_text(const char *epub_path, EpubBook *book)
     return true;
 }
 
+typedef struct {
+    size_t len;
+} CountSink;
+
+static int count_sink(void *ctx, const uint8_t *buf, size_t len) {
+    ARG_UNUSED(buf);
+    ((CountSink *)ctx)->len += len;
+    return 0;
+}
+
+typedef struct {
+    EntryReader reader;  // first: entry_read() is handed this struct
+    CountSink sink;
+} SmallEntryCtx;
+
+static int small_entry_read(void *ctx, uint8_t *buf, size_t len) {
+    return entry_read(&((SmallEntryCtx *)ctx)->reader, buf, len);
+}
+
+static int small_entry_write(void *ctx, const uint8_t *buf, size_t len) {
+    return count_sink(&((SmallEntryCtx *)ctx)->sink, buf, len);
+}
+
+// Loads a small ZIP entry (OPF, NCX) as a NUL-terminated string in the conversion work area,
+// so scanning needs no heap. Output under 32 KB never wraps the inflate history window, so
+// the window itself ends up holding the whole entry. Valid until the work area is reused.
+static char *load_small_entry(const char *epub_path, uint32_t offset, uint16_t method,
+                              uint32_t comp_size, uint32_t uncomp_size) {
+    if (uncomp_size == 0 || uncomp_size >= INFLATE_WINDOW_SIZE) return NULL;
+
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    if (fs_open(&file, epub_path, FS_O_READ) != 0) return NULL;
+
+    char *out = (char *)s_work.text.window;
+    size_t len = 0;
+    bool ok = false;
+    if (fs_seek(&file, offset, FS_SEEK_SET) == 0) {
+        if (method == 0) {
+            ssize_t n = fs_read(&file, out, uncomp_size);
+            ok = (n == (ssize_t)uncomp_size);
+            len = ok ? (size_t)n : 0;
+        } else if (method == 8) {
+            SmallEntryCtx ctx = { .reader = { .src = &file, .remaining = comp_size } };
+            ok = inflate_stream(s_work.text.window, s_work.text.in, sizeof(s_work.text.in),
+                                small_entry_read, small_entry_write, &ctx) == 0 &&
+                 ctx.sink.len < INFLATE_WINDOW_SIZE;
+            len = ok ? ctx.sink.len : 0;
+        }
+    }
+    fs_close(&file);
+    if (!ok) return NULL;
+    out[len] = '\0';
+    return out;
+}
+
+// Copies the text inside the first <tag ...>text</...> (or <alt_tag ...>) into out
+static void extract_tag_text(const char *xml, const char *tag, const char *alt_tag, char *out, size_t out_size) {
+    const char *start = strstr(xml, tag);
+    if (!start) start = strstr(xml, alt_tag);
+    if (!start) return;
+    const char *gt = strchr(start, '>');
+    const char *lt = gt ? strchr(gt + 1, '<') : NULL;
+    if (!lt || lt <= gt + 1) return;
+    size_t len = MIN((size_t)(lt - (gt + 1)), out_size - 1);
+    memcpy(out, gt + 1, len);
+    out[len] = '\0';
+}
+
 bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
     if (!epub_path || !book) return false;
 
@@ -626,58 +694,6 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
             opf_comp_method = comp_method;
             opf_comp_size = comp_size;
             opf_uncomp_size = uncomp_size;
-            char *opf_buf = k_malloc(uncomp_size + 1);
-            if (opf_buf) {
-                if (comp_method == 0) {
-                    fs_read(&file, opf_buf, uncomp_size);
-                    opf_buf[uncomp_size] = '\0';
-                } else if (comp_method == 8) {
-                    uint8_t *comp_buf = k_malloc(comp_size);
-                    if (comp_buf) {
-                        fs_read(&file, comp_buf, comp_size);
-                        unsigned long dest_len = uncomp_size;
-                        unsigned long src_len = comp_size;
-                        puff((unsigned char*)opf_buf, &dest_len, comp_buf, &src_len);
-                        opf_buf[dest_len] = '\0';
-                        k_free(comp_buf);
-                    }
-                }
-
-                // Extract <dc:title>
-                char *t_start = strstr(opf_buf, "<dc:title");
-                if (!t_start) t_start = strstr(opf_buf, "<title");
-                if (t_start) {
-                    char *t_end_tag = strchr(t_start, '>');
-                    if (t_end_tag) {
-                        char *t_close = strchr(t_end_tag + 1, '<');
-                        if (t_close && (t_close > t_end_tag + 1)) {
-                            size_t len = t_close - (t_end_tag + 1);
-                            if (len >= sizeof(book->title)) len = sizeof(book->title) - 1;
-                            strncpy(book->title, t_end_tag + 1, len);
-                            book->title[len] = '\0';
-                            LOG_INF("[EPUB Metadata] Title: %s", book->title);
-                        }
-                    }
-                }
-
-                // Extract <dc:creator>
-                char *c_start = strstr(opf_buf, "<dc:creator");
-                if (!c_start) c_start = strstr(opf_buf, "<creator");
-                if (c_start) {
-                    char *c_end_tag = strchr(c_start, '>');
-                    if (c_end_tag) {
-                        char *c_close = strchr(c_end_tag + 1, '<');
-                        if (c_close && (c_close > c_end_tag + 1)) {
-                            size_t len = c_close - (c_end_tag + 1);
-                            if (len >= sizeof(book->author)) len = sizeof(book->author) - 1;
-                            strncpy(book->author, c_end_tag + 1, len);
-                            book->author[len] = '\0';
-                            LOG_INF("[EPUB Metadata] Author: %s", book->author);
-                        }
-                    }
-                }
-                k_free(opf_buf);
-            }
         }
 
         if (is_html && !is_nav && uncomp_size > 0) {
@@ -702,35 +718,15 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
     fs_close(&file);
 
     bool spine_ordered = false;
-    if (opf_payload_offset > 0 && opf_uncomp_size > 0 && opf_uncomp_size < 32768) {
-        struct fs_file_t opfile;
-        fs_file_t_init(&opfile);
-        if (fs_open(&opfile, epub_path, FS_O_READ) == 0) {
-            fs_seek(&opfile, opf_payload_offset, FS_SEEK_SET);
-            char *opf_buf = k_malloc(opf_uncomp_size + 1);
-            if (opf_buf) {
-                if (opf_comp_method == 0) {
-                    fs_read(&opfile, opf_buf, opf_uncomp_size);
-                    opf_buf[opf_uncomp_size] = '\0';
-                } else if (opf_comp_method == 8) {
-                    uint8_t *cbuf = k_malloc(opf_comp_size);
-                    if (cbuf) {
-                        fs_read(&opfile, cbuf, opf_comp_size);
-                        unsigned long dest_len = opf_uncomp_size;
-                        unsigned long src_len = opf_comp_size;
-                        puff((unsigned char*)opf_buf, &dest_len, cbuf, &src_len);
-                        opf_buf[dest_len] = '\0';
-                        k_free(cbuf);
-                    } else {
-                        LOG_ERR("[EPUB OPF] Failed to allocate comp buffer (%u bytes)", opf_comp_size);
-                    }
-                }
-                spine_ordered = parse_opf_spine_order(opf_buf, book);
-                k_free(opf_buf);
-            } else {
-                LOG_ERR("[EPUB OPF] Failed to allocate uncomp buffer (%u bytes)", opf_uncomp_size);
-            }
-            fs_close(&opfile);
+    if (opf_payload_offset > 0) {
+        char *opf = load_small_entry(epub_path, opf_payload_offset, opf_comp_method, opf_comp_size, opf_uncomp_size);
+        if (opf) {
+            extract_tag_text(opf, "<dc:title", "<title", book->title, sizeof(book->title));
+            extract_tag_text(opf, "<dc:creator", "<creator", book->author, sizeof(book->author));
+            LOG_INF("[EPUB Metadata] Title: %s / Author: %s", book->title, book->author);
+            spine_ordered = parse_opf_spine_order(opf, book);
+        } else {
+            LOG_WRN("[EPUB OPF] Could not read the package file (%u bytes)", opf_uncomp_size);
         }
     }
 
@@ -738,35 +734,13 @@ bool epub_scan_chapters(const char *epub_path, EpubBook *book) {
         qsort(book->chapters, book->chapter_count, sizeof(EpubChapterInfo), natural_chapter_cmp);
     }
 
-    if (ncx_payload_offset > 0 && ncx_uncomp_size > 0 && ncx_uncomp_size < 32768) {
-        struct fs_file_t nfile;
-        fs_file_t_init(&nfile);
-        if (fs_open(&nfile, epub_path, FS_O_READ) == 0) {
-            fs_seek(&nfile, ncx_payload_offset, FS_SEEK_SET);
-            char *ncx_buf = k_malloc(ncx_uncomp_size + 1);
-            if (ncx_buf) {
-                if (ncx_comp_method == 0) {
-                    fs_read(&nfile, ncx_buf, ncx_uncomp_size);
-                    ncx_buf[ncx_uncomp_size] = '\0';
-                } else if (ncx_comp_method == 8) {
-                    uint8_t *cbuf = k_malloc(ncx_comp_size);
-                    if (cbuf) {
-                        fs_read(&nfile, cbuf, ncx_comp_size);
-                        unsigned long dest_len = ncx_uncomp_size;
-                        unsigned long src_len = ncx_comp_size;
-                        puff((unsigned char*)ncx_buf, &dest_len, cbuf, &src_len);
-                        ncx_buf[dest_len] = '\0';
-                        k_free(cbuf);
-                    } else {
-                        LOG_ERR("[EPUB NCX] Failed to allocate comp buffer (%u bytes)", ncx_comp_size);
-                    }
-                }
-                parse_toc_ncx_titles(ncx_buf, book);
-                k_free(ncx_buf);
-            } else {
-                LOG_ERR("[EPUB NCX] Failed to allocate uncomp buffer (%u bytes)", ncx_uncomp_size);
-            }
-            fs_close(&nfile);
+    if (ncx_payload_offset > 0) {
+        char *ncx = load_small_entry(epub_path, ncx_payload_offset, ncx_comp_method, ncx_comp_size, ncx_uncomp_size);
+        if (ncx) {
+            parse_toc_ncx_titles(ncx, book);
+        } else {
+            // Tables of contents over 32 KB don't fit the work area; chapters keep generated names
+            LOG_WRN("[EPUB NCX] Table of contents not read (%u bytes)", ncx_uncomp_size);
         }
     }
 
