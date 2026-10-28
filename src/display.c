@@ -968,7 +968,6 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
                 display_draw_pixel(cover_x + x, cover_y + y, white ? 1 : 0);
             }
         }
-        display_draw_rect(cover_x, cover_y, cover_w, cover_h, 0);
 
         // Right Half Metadata Panel (x=175 to g_w)
         int right_x = 175;
