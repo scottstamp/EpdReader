@@ -53,6 +53,7 @@ struct gdey037t03_data {
     const struct device *dev;
     enum display_orientation orientation;
     bool force_full_refresh;
+    bool draw_from_white; // next full refresh clears to white, then draws with the partial waveform
     bool powered;      // charge pump on (0x04 issued, no 0x02 since)
     bool vcc_off;      // panel supply cut; controller state and RAM are lost
     int lut_loaded;    // LUT_OTP, LUT_UNKNOWN or the partial waveform signature
@@ -177,6 +178,18 @@ static void epd_write_ram(const struct gdey037t03_config *config, uint8_t ram_cm
     epd_write_cmd(config, 0x92); // partial out
 }
 
+static void epd_fill_ram(const struct gdey037t03_config *config, uint8_t ram_cmd, uint8_t value, size_t len) {
+    uint8_t chunk[256];
+    memset(chunk, value, sizeof(chunk));
+    epd_write_cmd(config, 0x91); // partial in
+    epd_set_partial_ram_area(config, 0, 0, EPD_PHYS_WIDTH, EPD_PHYS_HEIGHT);
+    epd_write_cmd(config, ram_cmd);
+    for (size_t off = 0; off < len; off += sizeof(chunk)) {
+        epd_write_data_bytes(config, chunk, MIN(sizeof(chunk), len - off));
+    }
+    epd_write_cmd(config, 0x92); // partial out
+}
+
 // Soft reset into OTP waveform mode. Resets registers, so the charge pump is off afterwards.
 static void epd_init_display(const struct device *dev) {
     const struct gdey037t03_config *config = dev->config;
@@ -282,6 +295,11 @@ static int gdey037t03_init(const struct device *dev) {
 void gdey037t03_request_full_refresh(const struct device *dev) {
     struct gdey037t03_data *data = dev->data;
     data->force_full_refresh = true;
+}
+
+void gdey037t03_request_draw_from_white(const struct device *dev) {
+    struct gdey037t03_data *data = dev->data;
+    data->draw_from_white = true;
 }
 
 // UC8253 PLL (0x30) FRS[4:0] per datasheet: 5 Hz steps from 5 Hz (0) to 120 Hz (23),
@@ -434,6 +452,9 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
 
     bool full = data->force_full_refresh;
     data->force_full_refresh = false;
+    // Full refresh to white, then draw the frame with the partial waveform
+    bool from_white = full && data->draw_from_white;
+    data->draw_from_white = false;
 
     uint32_t t_tx, t_pwr, t_refresh;
 
@@ -441,9 +462,17 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
         // Back to the OTP waveform (a no-op reset if already there, cheap next to a full refresh)
         epd_init_display(dev);
 
-        // Stream target frame to both RAMs so the next partial refresh diffs against it
-        epd_write_ram(config, 0x13, buf, desc->buf_size);
-        epd_write_ram(config, 0x10, buf, desc->buf_size);
+        // Stream target frame to both RAMs so the next partial refresh diffs against it.
+        // Dithered images (covers) fade toward white the moment the OTP waveform ends, so
+        // those only get a white frame here and are drawn white->black by the partial
+        // waveform below, which holds them.
+        if (from_white) {
+            epd_fill_ram(config, 0x13, 0xFF, desc->buf_size);
+            epd_fill_ram(config, 0x10, 0xFF, desc->buf_size);
+        } else {
+            epd_write_ram(config, 0x13, buf, desc->buf_size);
+            epd_write_ram(config, 0x10, buf, desc->buf_size);
+        }
         t_tx = k_uptime_get_32();
 
         // Pure OTP Full Blanking Refresh
@@ -461,7 +490,15 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
             epd_power_off(dev);
             epd_init_display(dev);
         }
-    } else {
+
+        if (from_white) {
+            // Old frame for the partial draw below
+            epd_fill_ram(config, 0x10, 0xFF, desc->buf_size);
+            LOG_INF("EPD full refresh to white: refresh %u ms", t_refresh - t_pwr);
+        }
+    }
+
+    if (!full || from_white) {
         uint8_t t, rp, hz;
         partial_waveform_params(data, &t, &rp, &hz);
         int signature = (hz << 8) | (t << 4) | rp;
@@ -506,7 +543,7 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
     }
 
     LOG_INF("EPD %s refresh: tx %u ms, power-on %u ms, refresh %u ms, total %u ms",
-            full ? "full" : "partial", t_tx - t_start, t_pwr - t_tx, t_refresh - t_pwr,
+            from_white ? "full+draw" : full ? "full" : "partial", t_tx - t_start, t_pwr - t_tx, t_refresh - t_pwr,
             k_uptime_get_32() - t_start);
 
     k_work_schedule(&data->power_off_work, K_MSEC(EPD_IDLE_POWER_OFF_MS));

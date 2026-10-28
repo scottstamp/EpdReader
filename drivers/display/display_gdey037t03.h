@@ -32,6 +32,16 @@ struct gdey037t03_refresh_config {
 void gdey037t03_request_full_refresh(const struct device *dev);
 
 /**
+ * @brief Make the next full refresh clear to white, then draw the frame with the partial waveform
+ *
+ * The OTP full waveform leaves dense dithered images (book covers) fading back toward
+ * white as soon as it ends. Drawn white->black by the partial waveform instead, they hold.
+ *
+ * @param dev Pointer to device structure for the driver instance
+ */
+void gdey037t03_request_draw_from_white(const struct device *dev);
+
+/**
  * @brief Configure waveform refresh timing profile, pulse interval, and pulse count
  */
 int gdey037t03_set_refresh_config(const struct device *dev, const struct gdey037t03_refresh_config *cfg);

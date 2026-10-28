@@ -1061,6 +1061,10 @@ void display_draw_lockscreen(const char *book_name, const char *title, const cha
         display_draw_gfx_string(left_x, 222, "Press any button to wake", &AmazonEmber_Medium9pt7b, 0);
     }
 
+    if (has_cover) {
+        // Dithered covers fade toward white once the OTP waveform ends
+        gdey037t03_request_draw_from_white(epd_dev);
+    }
     display_update(true);
 }
 
