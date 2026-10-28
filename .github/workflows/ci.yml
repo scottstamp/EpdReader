@@ -1,8 +1,11 @@
-name: CI
+name: Release
 
+# Builds run locally day to day; GitHub builds tagged releases and candidates
 on:
   push:
-  pull_request:
+    tags:
+      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -147,3 +150,34 @@ jobs:
             build/nrf_epd/zephyr/zephyr.uf2
             build/nrf_epd/zephyr/zephyr.elf
           if-no-files-found: error
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [host-tests, firmware]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: firmware
+          path: firmware
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir dist
+          cp firmware/zephyr.uf2 "dist/epd-reader-$TAG.uf2"
+          cp firmware/zephyr.elf "dist/epd-reader-$TAG.elf"
+          # v1.2.0-rc1 and similar are release candidates
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            "${prerelease[@]}"
