@@ -1,6 +1,7 @@
 // Minimal stand-ins for the Zephyr APIs display.c and font_extended.c use, so they
 // compile on a PC for tools/ui_preview. Only what the renderer touches is provided.
 #pragma once
+#include <errno.h>   // zephyr/kernel.h provides errno codes; glibc doesn't pull them in elsewhere
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
