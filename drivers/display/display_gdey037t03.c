@@ -110,13 +110,29 @@ static void epd_busy_released(const struct device *port, struct gpio_callback *c
 
 // Blocks until BUSY (active low on this panel) is released. busy_sem must have been
 // reset before the operation started, so a release edge that already fired is not missed.
+// The edge only wakes the wait; the pin level decides, so a glitch on BUSY mid-refresh
+// doesn't end it early (power-off would then cut the refresh short and leave part of the
+// image faded).
 static void epd_wait_idle(const struct device *dev, const char *stage_name, int timeout_ms) {
     const struct gdey037t03_config *config = dev->config;
     struct gdey037t03_data *data = dev->data;
+    int64_t deadline = k_uptime_get() + timeout_ms;
 
-    if (gpio_pin_get_dt(&config->busy_gpio) == 1 &&
-        k_sem_take(&data->busy_sem, K_MSEC(timeout_ms)) != 0) {
-        LOG_WRN("EPD BUSY timeout during %s after %d ms", stage_name, timeout_ms);
+    for (;;) {
+        while (gpio_pin_get_dt(&config->busy_gpio) == 1) {
+            int64_t left = deadline - k_uptime_get();
+            if (left <= 0) {
+                LOG_WRN("EPD BUSY timeout during %s after %d ms", stage_name, timeout_ms);
+                return;
+            }
+            k_sem_take(&data->busy_sem, K_MSEC(left));
+        }
+        // A real release stays released
+        k_msleep(1);
+        if (gpio_pin_get_dt(&config->busy_gpio) == 0) {
+            return;
+        }
+        LOG_WRN("EPD BUSY glitch during %s", stage_name);
     }
 }
 
@@ -436,7 +452,8 @@ static int gdey037t03_write(const struct device *dev, const uint16_t x, const ui
 
         epd_power_on(dev);
         t_pwr = k_uptime_get_32();
-        epd_cmd_wait(dev, 0x12, "UpdateFull", 3500);
+        // OTP full refresh slows down in the cold; a timeout here powers off mid-refresh
+        epd_cmd_wait(dev, 0x12, "UpdateFull", 10000);
         t_refresh = k_uptime_get_32();
 
         if (!IS_ENABLED(CONFIG_GDEY037T03_KEEP_POWERED)) {
@@ -548,6 +565,8 @@ static int gdey037t03_blanking_on(const struct device *dev) {
     k_mutex_lock(&data->lock, K_FOREVER);
     k_work_cancel_delayable(&data->power_off_work);
     epd_power_off(dev);
+    // Never cut the supply while the controller is still driving the panel
+    epd_wait_idle(dev, "Sleep", 1000);
 
     if (config->vcc_gpio.port) {
         gpio_pin_set_dt(&config->vcc_gpio, 0);
