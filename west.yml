@@ -5,12 +5,23 @@ manifest:
 
   projects:
     # nRF Connect SDK. Importing it pulls in the matching sdk-zephyr fork
-    # and all required modules (hal_nordic, mcuboot, littlefs, fatfs, ...).
+    # and the modules this app needs. Only used to create a workspace from
+    # scratch (CI); local builds with an installed NCS ignore this file.
     - name: nrf
       remote: ncs
       repo-path: sdk-nrf
       revision: v3.4.1
-      import: true
+      import:
+        # Only the projects the build actually uses (checked against
+        # zephyr_modules.txt of a full-NCS build: same zephyr.bin), so CI
+        # doesn't clone all of NCS. Add a module here if a new Kconfig
+        # option needs one (e.g. littlefs, mbedtls, mcuboot).
+        name-allowlist:
+          - zephyr
+          - nrfxlib     # SoftDevice Controller, MPSL
+          - hal_nordic  # nrfx
+          - cmsis_6
+          - fatfs
 
   self:
     path: nrf_epd

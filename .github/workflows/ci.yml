@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Upload protocol C unit tests
+        run: |
+          gcc -Wall -Wextra -Werror -std=c11 -pedantic -O2 -I src -o "$RUNNER_TEMP/upload_sim" \
+              tools/upload_test/upload_sim.c src/upload_proto.c
+          mkdir -p "$RUNNER_TEMP/upload_store"
+          "$RUNNER_TEMP/upload_sim" "$RUNNER_TEMP/upload_store"
+
+      - name: BLE upload client tests
+        run: python tools/upload_test/test_upload.py
+
+      - name: Lists doc format + Web Bluetooth client tests
+        run: node tools/lists_web/test/test_web.mjs
+
+      - name: UI preview (layout self-checks)
+        run: python tools/ui_preview/preview.py
+
+      - name: Upload UI preview PNGs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-preview
+          path: tools/ui_preview/out/*.png
+          if-no-files-found: warn
+
+      - name: src/icons.h is up to date with tools/icon_gen.py
+        run: |
+          python tools/icon_gen.py
+          git diff --exit-code src/icons.h || {
+            echo "::error file=src/icons.h::src/icons.h is stale; run 'python tools/icon_gen.py' and commit the result"
+            exit 1
+          }
+
+  firmware:
+    name: Firmware (promicro_nrf52840/nrf52840/uf2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Nordic's toolchain image for this exact NCS version (west, CMake, Ninja,
+    # Zephyr SDK). Its BASH_ENV script puts the toolchain on PATH in every
+    # non-interactive bash step.
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.1
+    defaults:
+      run:
+        shell: bash
+    env:
+      BOARD: promicro_nrf52840/nrf52840/uf2
+    steps:
+      # west.yml has self.path: nrf_epd, so the app lives in nrf_epd/ and the
+      # job workspace becomes the west topdir.
+      - uses: actions/checkout@v7
+        with:
+          path: nrf_epd
+
+      - name: Toolchain
+        run: |
+          # The workspace is owned by the runner user, not the container's root
+          git config --global --add safe.directory '*'
+          west --version
+          cmake --version
+          ninja --version
+          echo "ZEPHYR_SDK_INSTALL_DIR=$ZEPHYR_SDK_INSTALL_DIR"
+
+      - name: Cache west modules
+        uses: actions/cache@v6
+        with:
+          path: |
+            nrf
+            zephyr
+            nrfxlib
+            modules
+          key: ncs-modules-${{ hashFiles('nrf_epd/west.yml') }}
+
+      - name: West workspace
+        run: |
+          west init -l nrf_epd
+          west update --narrow -o=--depth=1
+          west list
+
+      - name: Build
+        run: |
+          west build --sysbuild -b "$BOARD" -d build nrf_epd 2>&1 | tee build.log
+
+      - name: Fail on warnings
+        run: |
+          # Any compiler, linker, Kconfig or CMake warning, except the known
+          # harmless CMake notice for the empty drivers__display library
+          awk '
+            pending != "" {
+              if ($0 !~ /No SOURCES given to Zephyr library: drivers__display/) print pending
+              pending = ""
+            }
+            /CMake Warning/ { pending = $0; next }
+            tolower($0) ~ /warning:/ { print }
+            END { if (pending != "") print pending }
+          ' build.log > warnings.txt
+          if [ -s warnings.txt ]; then
+            echo "::error::Build produced warnings"
+            cat warnings.txt
+            exit 1
+          fi
+          echo "No warnings."
+
+      - name: Memory usage
+        run: |
+          grep -A3 '^Memory region' build.log
+          {
+            echo '### Firmware memory usage'
+            echo '```'
+            grep -A3 '^Memory region' build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware
+          path: |
+            build/nrf_epd/zephyr/zephyr.uf2
+            build/nrf_epd/zephyr/zephyr.elf
+          if-no-files-found: error
